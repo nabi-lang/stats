@@ -1,0 +1,168 @@
+// The multivariate normal distribution N(mu, Sigma).
+
+use pkg::data::{Sample, vector};
+use pkg::dist::{Distribution, check, draw};
+use pkg::error::{from_linalg, need, same};
+use pkg::{StatsError, Values};
+use core::array::{Array, Matrix, Vector};
+use linalg::Triangle;
+use std::random::Rng;
+
+const LN_2PI: f64 = 1.8378770664093453;
+
+/// The multivariate normal distribution with mean `mu` and covariance
+/// `sigma` (symmetric positive definite), through its Cholesky factor
+/// `sigma = L L^T` (linalg): the density by one triangular solve and
+/// `ln det sigma = 2 sum ln L_ii`, a draw as `mu + L z`.
+///
+/// ```nabi
+/// use core::array::{Matrix, Vector};
+/// use stats::MultivariateNormal;
+///
+/// let mu: Vector<f64> = [0, 0];
+/// let s: Matrix<f64> = [[2, 1], [1, 2]];
+/// let d = try MultivariateNormal::new(mu, s);
+/// let x: Vector<f64> = [0, 0];
+/// assert((try d.logpdf(x) - (-(2.0 * 3.141592653589793).ln() - 0.5 * 3.0.ln())).abs() < 1e-15);
+/// ```
+pub struct MultivariateNormal {
+    pub(pkg) mu: Vector<f64>;
+    pub(pkg) sigma: Matrix<f64>;
+    pub(pkg) l: Matrix<f64>;
+    pub(pkg) logdet: f64;
+}
+
+impl MultivariateNormal {
+    /// N(mu, sigma). Throws `ShapeMismatch` unless `sigma` is k x k for
+    /// `k = len(mu)`, `NotFinite` for NaN or infinity, `Singular` when
+    /// `sigma` is not positive definite.
+    pub fn new(mu: Vector<f64>, sigma: Matrix<f64>) throws (StatsError) -> MultivariateNormal {
+        let s = sigma.shape();
+        try same("MultivariateNormal: the rows of sigma and mu", s[0], mu.len());
+        try same("MultivariateNormal: the rows and columns of sigma", s[0], s[1]);
+        try check(mu.len() > 0, "MultivariateNormal: mu is empty; give at least one dimension");
+        for i in 0..s[0] {
+            for j in 0..i {
+                let (a, b) = (sigma[i, j], sigma[j, i]);
+                try check((a - b).abs() <= 1e-12 * (a.abs() + b.abs()), f"MultivariateNormal: sigma[{i}, {j}] = {a} but sigma[{j}, {i}] = {b}; a covariance is symmetric");
+            }
+        }
+        let c = try linalg::cholesky(sigma) catch e: linalg::LinalgError { throw from_linalg("MultivariateNormal: sigma", e); };
+        let l = c.l();
+        let ld = 0.0;
+        for i in 0..s[0] { ld += 2.0 * l[i, i].ln(); }
+        MultivariateNormal { mu: mu.copy(), sigma: sigma.copy(), l: l, logdet: ld }
+    }
+
+    /// The dimension.
+    pub fn dim(self) -> usize { self.mu.len() }
+
+    /// The mean vector.
+    pub fn mean(self) -> Vector<f64> { self.mu.copy() }
+
+    /// The covariance matrix.
+    pub fn cov(self) -> Matrix<f64> { self.sigma.copy() }
+
+    /// The Cholesky factor `L` of the covariance.
+    pub fn l(self) -> Matrix<f64> { self.l.copy() }
+
+    /// `ln det sigma`.
+    pub fn logdet(self) -> f64 { self.logdet }
+
+    /// The log density at `x`: `-(k ln 2 pi + ln det sigma + |L^-1 (x -
+    /// mu)|^2) / 2`. Throws `ShapeMismatch` for a wrong length.
+    ///
+    /// ```nabi
+    /// use core::array::{Matrix, Vector};
+    ///
+    /// let mu: Vector<f64> = [0];
+    /// let s: Matrix<f64> = [[1]];
+    /// let d = try stats::MultivariateNormal::new(mu, s);
+    /// let x: Vector<f64> = [0];
+    /// assert((try d.logpdf(x) + 0.9189385332046728).abs() < 1e-15);
+    /// ```
+    pub fn logpdf(self, x: Vector<f64>) throws (StatsError) -> f64 {
+        try same("MultivariateNormal::logpdf: x and mu", x.len(), self.mu.len());
+        let r = x .- self.mu;
+        let z = try linalg::solve_triangular(self.l, r, Triangle::Lower) catch e: linalg::LinalgError { throw from_linalg("MultivariateNormal: L", e); };
+        let q = 0.0;
+        for t in z { q += t * t; }
+        -0.5 * (self.mu.len() as f64 * LN_2PI + self.logdet + q)
+    }
+
+    /// The density at `x`.
+    pub fn pdf(self, x: Vector<f64>) throws (StatsError) -> f64 { (try self.logpdf(x)).exp() }
+
+    /// The squared Mahalanobis distance `(x - mu)^T sigma^-1 (x - mu)`.
+    ///
+    /// ```nabi
+    /// use core::array::{Matrix, Vector};
+    ///
+    /// let mu: Vector<f64> = [0, 0];
+    /// let s: Matrix<f64> = [[4, 0], [0, 1]];
+    /// let d = try stats::MultivariateNormal::new(mu, s);
+    /// let x: Vector<f64> = [2, 1];
+    /// assert((try d.mahalanobis(x) - 2.0).abs() < 1e-14);
+    /// ```
+    pub fn mahalanobis(self, x: Vector<f64>) throws (StatsError) -> f64 {
+        let k = self.mu.len() as f64;
+        -2.0 * (try self.logpdf(x)) - k * LN_2PI - self.logdet
+    }
+
+    /// `n` draws as the rows of an n x k matrix.
+    ///
+    /// ```nabi
+    /// use core::array::{Matrix, Vector};
+    /// use std::random::Xoshiro256PlusPlus;
+    ///
+    /// let mu: Vector<f64> = [1, 2];
+    /// let s: Matrix<f64> = [[1, 0.5], [0.5, 1]];
+    /// let d = try stats::MultivariateNormal::new(mu, s);
+    /// let g = Xoshiro256PlusPlus::seed(3);
+    /// let x = d.sample_rows(ref g, 5000);
+    /// assert(x.shape() == [5000, 2] && (stats::mean(x[:, 1]) - 2.0).abs() < 0.1);
+    /// ```
+    pub fn sample_rows<G: Rng>(self, ref g: G, n: usize) -> Matrix<f64> {
+        let k = self.mu.len();
+        let zs: List<f64> = List::with_capacity(n * k);
+        for _ in 0..n * k { zs.push(draw::normal(ref g)); }
+        let z: Matrix<f64> = Array::view_list(zs, [n, k]);
+        let y = try! linalg::matmul(z, self.l.t());
+        y .+ self.mu
+    }
+
+    /// The maximum-likelihood fit from the rows of `x` (one observation
+    /// per row): the column means and the covariance with `ddof = 0`.
+    ///
+    /// ```nabi
+    /// use core::array::Matrix;
+    ///
+    /// let x: Matrix<f64> = [[1, 2], [3, 3], [2, 7]];
+    /// let d = try stats::MultivariateNormal::fit(x);
+    /// assert(d.mean()[0] == 2.0 && d.mean()[1] == 4.0);
+    /// ```
+    pub fn fit(x: Matrix<f64>) throws (StatsError) -> MultivariateNormal {
+        let s = x.shape();
+        try need("MultivariateNormal::fit", s[1] + 1, s[0]);
+        let m: List<f64> = List::from_fn(s[1], |j| pkg::mean(x[:, j]));
+        let mu: Vector<f64> = Array::view_list(m, [s[1]]);
+        let c = try pkg::cov(x, 0);
+        try MultivariateNormal::new(mu, c)
+    }
+}
+
+impl Distribution for MultivariateNormal {
+    type Value = Vector<f64>;
+    fn sample<G: Rng>(self, ref g: G) -> Vector<f64> {
+        let k = self.mu.len();
+        let z = Values::new(k);
+        for i in 0..k { unsafe { z.d.set(i, draw::normal(ref g)); } }
+        let out = Values::new(k);
+        for i in 0..k {
+            let s = self.mu[i];
+            for j in 0..i + 1 { s += self.l[i, j] * z.at(j); }
+            unsafe { out.d.set(i, s); }
+        }
+        vector(out.d, 0, k)
+    }
+}

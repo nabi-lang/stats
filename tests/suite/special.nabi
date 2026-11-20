@@ -1,0 +1,23 @@
+// The special functions come from the `special` package, which tests
+// them against mpmath; here only that `stats::special` passes them on.
+
+use pkg::special;
+use pkg::tests::suite::{close, expect};
+
+#[test]
+fn reexports() {
+    expect(special::gamma(5.0) == 24.0 && special::lgamma(1.0) == 0.0, "gamma");
+    close(special::digamma(1.0), -0.5772156649015329, 1e-16, "digamma");
+    close(special::trigamma(1.0), 1.6449340668482264, 1e-15, "trigamma");
+    close(special::erf(0.5) + special::erfc(0.5), 1.0, 1e-16, "erf");
+    close(special::ndtri(special::ndtr(1.25)), 1.25, 1e-15, "ndtr");
+    close(special::erfinv(special::erf(0.3)), 0.3, 1e-16, "erfinv");
+    close(special::erfc(special::erfcinv(0.2)), 0.2, 1e-16, "erfcinv");
+    close(special::gammainc(2.0, 1.0) + special::gammaincc(2.0, 1.0), 1.0, 1e-16, "gammainc");
+    close(special::gammainc(3.0, special::gammaincinv(3.0, 0.4)), 0.4, 1e-15, "gammaincinv");
+    close(special::gammaincc(3.0, special::gammainccinv(3.0, 0.4)), 0.4, 1e-15, "gammainccinv");
+    close(special::betainc(2.0, 3.0, 0.4) + special::betaincc(2.0, 3.0, 0.4), 1.0, 1e-16, "betainc");
+    close(special::betainc(2.0, 5.0, special::betaincinv(2.0, 5.0, 0.3)), 0.3, 1e-15, "betaincinv");
+    close(special::beta(2.0, 3.0), 1.0 / 12.0, 1e-17, "beta");
+    close(special::lbeta(2.0, 3.0), (1.0 / 12.0).ln(), 1e-15, "lbeta");
+}

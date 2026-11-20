@@ -1,0 +1,180 @@
+//! Statistics along one axis of an array: each lane along `axis` is
+//! reduced to one value, giving an array of one rank less (NumPy's
+//! `axis=` argument). Every function throws `InvalidArgument` for an
+//! axis past the rank.
+
+use pkg::StatsError;
+use pkg::data::{Sample, Values, lanes, shaped};
+use pkg::descriptive::order::{QuantileMethod, select_q};
+use pkg::descriptive::{kurt_of, skew_of};
+use pkg::error::arg;
+use pkg::kernel;
+use core::array::{Array, Vector};
+
+fn check(what: str, axis: usize, n: usize) throws (StatsError) {
+    try arg(axis < n, f"{what}: axis {axis} of a rank-{n} array; axes run 0..{n}");
+}
+
+fn reduce<const N: usize>(what: str, a: Array<f64, N>, axis: usize, f: fn(Values, usize, usize) -> f64) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try arg(axis < N, f"{what}: axis {axis} of a rank-{N} array; axes run 0..{N}");
+    let (v, count, len, shape) = lanes(a, axis);
+    let out = Values::new(count);
+    for j in 0..count { unsafe { out.d.set(j, f(v, j * len, len)); } }
+    shaped(out.d, shape)
+}
+
+/// The mean of each lane along `axis`.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[1, 2, 3], [4, 5, 6]];
+/// assert((try stats::axis::mean(m, 0)).to_list() == [2.5, 3.5, 4.5]);
+/// assert((try stats::axis::mean(m, 1)).to_list() == [2.0, 5.0]);
+/// ```
+pub fn mean<const N: usize>(a: Array<f64, N>, axis: usize) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try check("axis::mean", axis, N);
+    a.mean_along(axis)
+}
+
+/// The sum of each lane along `axis` (pairwise).
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[1, 2, 9], [4, 6, 8]];
+/// assert((try stats::axis::sum(m, 1)).to_list() == [12.0, 18.0]);
+/// ```
+pub fn sum<const N: usize>(a: Array<f64, N>, axis: usize) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try check("axis::sum", axis, N);
+    a.sum_along(axis)
+}
+
+/// The variance of each lane along `axis`, dividing by `n - ddof`.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[1, 2], [3, 6]];
+/// assert((try stats::axis::var(m, 0, 1)).to_list() == [2.0, 8.0]);
+/// ```
+pub fn var<const N: usize>(a: Array<f64, N>, axis: usize, ddof: usize = 0) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try check("axis::var", axis, N);
+    a.var_along(axis, ddof)
+}
+
+/// The standard deviation of each lane along `axis`.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[1, 2, 9], [4, 6, 8]];
+/// assert((try stats::axis::std(m, 0))[0] == 1.5);
+/// ```
+pub fn std<const N: usize>(a: Array<f64, N>, axis: usize, ddof: usize = 0) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try check("axis::std", axis, N);
+    a.std_along(axis, ddof)
+}
+
+/// The smallest value of each lane along `axis`.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[1, 2, 9], [4, 6, 8]];
+/// assert((try stats::axis::min(m, 1)).to_list() == [1.0, 4.0]);
+/// ```
+pub fn min<const N: usize>(a: Array<f64, N>, axis: usize) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try check("axis::min", axis, N);
+    // An empty lane has no minimum: NaN, as for a whole sample (core panics).
+    if a.shape()[axis] == 0 {
+        return try reduce("axis::min", a, axis, |_v: Values, _o: usize, _n: usize| -> f64 { f64::NAN });
+    }
+    a.min_along(axis)
+}
+
+/// The largest value of each lane along `axis`.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[1, 2, 9], [4, 6, 8]];
+/// assert((try stats::axis::max(m, 0)).to_list() == [4.0, 6.0, 9.0]);
+/// ```
+pub fn max<const N: usize>(a: Array<f64, N>, axis: usize) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try check("axis::max", axis, N);
+    // An empty lane has no maximum: NaN, as for a whole sample (core panics).
+    if a.shape()[axis] == 0 {
+        return try reduce("axis::max", a, axis, |_v: Values, _o: usize, _n: usize| -> f64 { f64::NAN });
+    }
+    a.max_along(axis)
+}
+
+fn lane_quantile(v: Values, o: usize, n: usize, q: f64, m: QuantileMethod) -> f64 {
+    if n == 0 || kernel::has_nan(v.d, o, n) { return f64::NAN; }
+    select_q(kernel::copy(v.d, o, n), n, q, m)
+}
+
+/// The median of each lane along `axis`.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[3, 1, 2], [9, 7, 8]];
+/// assert((try stats::axis::median(m, 1)).to_list() == [2.0, 8.0]);
+/// ```
+pub fn median<const N: usize>(a: Array<f64, N>, axis: usize) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try reduce("axis::median", a, axis, |v: Values, o: usize, n: usize| -> f64 { lane_quantile(v, o, n, 0.5, QuantileMethod::Linear) })
+}
+
+/// The `q`-quantile of each lane along `axis`, by `method`.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[1, 2, 9], [4, 6, 8]];
+/// assert((try stats::axis::quantile(m, 0, 0.25)).to_list() == [1.75, 3.0, 8.25]);
+/// ```
+pub fn quantile<const N: usize>(a: Array<f64, N>, axis: usize, q: f64, method: QuantileMethod = QuantileMethod::Linear) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try arg(q >= 0.0 && q <= 1.0, f"axis::quantile: q = {q} is outside [0, 1]");
+    try reduce("axis::quantile", a, axis, |v: Values, o: usize, n: usize| -> f64 { lane_quantile(v, o, n, q, method) })
+}
+
+/// The skewness of each lane along `axis` (see `stats::skew`).
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[1, 2, 9], [4, 6, 8]];
+/// assert((try stats::axis::skew(m, 1))[1] == 0.0);
+/// ```
+pub fn skew<const N: usize>(a: Array<f64, N>, axis: usize, bias: bool = true) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try reduce("axis::skew", a, axis, |v: Values, o: usize, n: usize| -> f64 { skew_of(v, o, n, bias) })
+}
+
+/// The kurtosis of each lane along `axis` (see `stats::kurtosis`).
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[1, 2, 3, 4, 5], [2, 4, 6, 8, 10]];
+/// let k = try stats::axis::kurtosis(m, 1);
+/// assert((k[0] + 1.3).abs() < 1e-14 && (k[1] + 1.3).abs() < 1e-14);
+/// ```
+pub fn kurtosis<const N: usize>(a: Array<f64, N>, axis: usize, fisher: bool = true, bias: bool = true) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try reduce("axis::kurtosis", a, axis, |v: Values, o: usize, n: usize| -> f64 { kurt_of(v, o, n, fisher, bias) })
+}
+
+/// `f` of each lane along `axis`, the lane as a vector: any statistic
+/// of one sample along an axis.
+///
+/// ```nabi
+/// use core::array::{Matrix, Vector};
+///
+/// let m: Matrix<f64> = [[1, 5], [2, 9], [3, 1]];
+/// let r = try stats::axis::apply(m, 0, |x: Vector<f64>| -> f64 { stats::range(x) });
+/// assert(r.to_list() == [2.0, 8.0]);
+/// ```
+pub fn apply<const N: usize>(a: Array<f64, N>, axis: usize, f: fn(Vector<f64>) -> f64) throws (StatsError) -> Array<f64, { N - 1 }> {
+    try reduce("axis::apply", a, axis, |v: Values, o: usize, n: usize| -> f64 { f(pkg::data::vector(v.d, o, n)) })
+}

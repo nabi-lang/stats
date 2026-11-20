@@ -1,0 +1,69 @@
+// The exponential distribution with rate lambda.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::descriptive::mean_of;
+use pkg::dist::{Continuous, Distribution, check, draw};
+use pkg::error::{arg, need};
+use std::random::Rng;
+
+/// The exponential distribution with rate `lambda > 0` (mean `1 /
+/// lambda`; SciPy's `expon(scale=1/lambda)`).
+///
+/// ```nabi
+/// use stats::{Continuous, Exponential};
+///
+/// let d = try Exponential::new(2.0);
+/// assert(d.mean() == 0.5);
+/// assert((d.cdf(1.0) - (1.0 - (-2.0).exp())).abs() < 1e-16);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Exponential {
+    pub(pkg) rate: f64;
+}
+
+impl Exponential {
+    /// The exponential distribution with rate `lambda` (finite, > 0).
+    pub fn new(lambda: f64) throws (StatsError) -> Exponential {
+        try check(lambda > 0.0 && lambda.is_finite(), f"Exponential: lambda = {lambda}; the rate must be finite and > 0 (it is 1 / mean)");
+        Exponential { rate: lambda }
+    }
+
+    /// The rate.
+    pub fn rate(self) -> f64 { self.rate }
+
+    /// The maximum-likelihood fit `lambda = 1 / mean(x)`; values must be
+    /// `>= 0` and not all 0.
+    ///
+    /// ```nabi
+    /// assert((try stats::Exponential::fit([1.0, 2.0, 3.0])).rate() == 0.5);
+    /// ```
+    pub fn fit<X: Sample>(x: X) throws (StatsError) -> Exponential {
+        let v = x.values();
+        try need("Exponential::fit", 1, v.n);
+        for i in 0..v.n { try arg(v.at(i) >= 0.0 && v.at(i).is_finite(), f"Exponential::fit: value {i} is {v.at(i)}; values must be finite and >= 0"); }
+        try Exponential::new(1.0 / mean_of(v))
+    }
+}
+
+impl Distribution for Exponential {
+    type Value = f64;
+    fn sample<G: Rng>(self, ref g: G) -> f64 { draw::exponential(ref g) / self.rate }
+}
+
+impl Continuous for Exponential {
+    fn pdf(self, x: f64) -> f64 { if x < 0.0 { 0.0 } else { self.rate * (-self.rate * x).exp() } }
+    fn logpdf(self, x: f64) -> f64 { if x < 0.0 { f64::NEG_INFINITY } else { self.rate.ln() - self.rate * x } }
+    fn cdf(self, x: f64) -> f64 { if x <= 0.0 { 0.0 } else { -(-self.rate * x).exp_m1() } }
+    fn sf(self, x: f64) -> f64 { if x <= 0.0 { 1.0 } else { (-self.rate * x).exp() } }
+    fn ppf(self, p: f64) -> f64 {
+        if !(p >= 0.0 && p <= 1.0) { return f64::NAN; }
+        -(-p).ln_1p() / self.rate
+    }
+    fn isf(self, q: f64) -> f64 {
+        if !(q >= 0.0 && q <= 1.0) { return f64::NAN; }
+        -q.ln() / self.rate
+    }
+    fn mean(self) -> f64 { 1.0 / self.rate }
+    fn var(self) -> f64 { 1.0 / (self.rate * self.rate) }
+}

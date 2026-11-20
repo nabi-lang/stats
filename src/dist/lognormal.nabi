@@ -1,0 +1,85 @@
+// The log-normal distribution: ln X ~ N(mu, sigma^2).
+
+use pkg::data::Sample;
+use pkg::descriptive::{mean_of, var_of};
+use pkg::dist::{Continuous, Distribution, check, draw};
+use pkg::error::{arg, need};
+use pkg::{StatsError, Values};
+use specfun::{ndtr, ndtri_pq as qnorm};
+use std::random::Rng;
+
+const LN_SQRT_2PI: f64 = 0.9189385332046728;
+
+/// The log-normal distribution: `X = e^Y` with `Y ~ N(mu, sigma^2)`
+/// (SciPy's `lognorm(s=sigma, scale=e^mu)`).
+///
+/// ```nabi
+/// use stats::{Continuous, LogNormal};
+///
+/// let d = try LogNormal::new(0.0, 1.0);
+/// assert(d.median() == 1.0);
+/// assert((d.mean() - 0.5.exp()).abs() < 1e-15);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LogNormal {
+    pub(pkg) mu: f64;
+    pub(pkg) sigma: f64;
+}
+
+impl LogNormal {
+    /// The log-normal of N(mu, sigma^2); `mu` finite, `sigma > 0`.
+    pub fn new(mu: f64, sigma: f64) throws (StatsError) -> LogNormal {
+        try check(mu.is_finite() && sigma > 0.0 && sigma.is_finite(), f"LogNormal: mu = {mu}, sigma = {sigma}; mu must be finite and sigma finite and > 0");
+        LogNormal { mu: mu, sigma: sigma }
+    }
+
+    /// The mean of `ln X`.
+    pub fn mu(self) -> f64 { self.mu }
+
+    /// The standard deviation of `ln X`.
+    pub fn sigma(self) -> f64 { self.sigma }
+
+    /// The maximum-likelihood fit: the mean and population standard
+    /// deviation of `ln x`. Every value must be positive.
+    ///
+    /// ```nabi
+    /// let d = try stats::LogNormal::fit([1.0, 10.0, 100.0]);
+    /// assert((d.mu() - 10.0.ln()).abs() < 1e-15);
+    /// ```
+    pub fn fit<X: Sample>(x: X) throws (StatsError) -> LogNormal {
+        let v = x.values();
+        try need("LogNormal::fit", 2, v.n);
+        let l = Values::new(v.n);
+        for i in 0..v.n {
+            let t = v.at(i);
+            try arg(t > 0.0 && t.is_finite(), f"LogNormal::fit: value {i} is {t}; every value must be finite and > 0");
+            unsafe { l.d.set(i, t.ln()); }
+        }
+        try LogNormal::new(mean_of(l), var_of(l, 0).sqrt())
+    }
+}
+
+impl Distribution for LogNormal {
+    type Value = f64;
+    fn sample<G: Rng>(self, ref g: G) -> f64 { (self.mu + self.sigma * draw::normal(ref g)).exp() }
+}
+
+impl Continuous for LogNormal {
+    fn pdf(self, x: f64) -> f64 { if x <= 0.0 { 0.0 } else { self.logpdf(x).exp() } }
+    fn logpdf(self, x: f64) -> f64 {
+        if x <= 0.0 { return f64::NEG_INFINITY; }
+        let l = x.ln();
+        let z = (l - self.mu) / self.sigma;
+        -0.5 * z * z - self.sigma.ln() - LN_SQRT_2PI - l
+    }
+    fn cdf(self, x: f64) -> f64 { if x <= 0.0 { 0.0 } else { ndtr((x.ln() - self.mu) / self.sigma) } }
+    fn sf(self, x: f64) -> f64 { if x <= 0.0 { 1.0 } else { ndtr((self.mu - x.ln()) / self.sigma) } }
+    fn ppf(self, p: f64) -> f64 { (self.mu + self.sigma * qnorm(p, 1.0 - p)).exp() }
+    fn isf(self, q: f64) -> f64 { (self.mu - self.sigma * qnorm(q, 1.0 - q)).exp() }
+    fn mean(self) -> f64 { (self.mu + 0.5 * self.sigma * self.sigma).exp() }
+    fn var(self) -> f64 {
+        let s2 = self.sigma * self.sigma;
+        s2.exp_m1() * (2.0 * self.mu + s2).exp()
+    }
+    fn median(self) -> f64 { self.mu.exp() }
+}

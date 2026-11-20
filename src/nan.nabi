@@ -1,0 +1,86 @@
+//! NaN-aware statistics: the same as the plain ones on the values that
+//! are not NaN (NumPy's `nanmean`, ...). Infinities are kept.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::descriptive::order::{QuantileMethod, median_of, select_q};
+use pkg::descriptive::{mean_of, var_of};
+use pkg::error::arg;
+use pkg::kernel;
+
+/// The number of values that are not NaN.
+///
+/// ```nabi
+/// assert(stats::nan::count([1.0, f64::NAN, 3.0]) == 2);
+/// ```
+pub fn count<X: Sample>(x: X) -> usize { x.values().without_nan().n }
+
+/// The sum of the values that are not NaN (0 when there are none).
+///
+/// ```nabi
+/// assert(stats::nan::sum([1.0, f64::NAN, 2.0]) == 3.0);
+/// ```
+pub fn sum<X: Sample>(x: X) -> f64 {
+    let v = x.values().without_nan();
+    kernel::sum(v.d, 0, v.n)
+}
+
+/// The mean of the values that are not NaN; NaN when there are none.
+///
+/// ```nabi
+/// assert(stats::nan::mean([1.0, f64::NAN, 3.0]) == 2.0);
+/// ```
+pub fn mean<X: Sample>(x: X) -> f64 { mean_of(x.values().without_nan()) }
+
+/// The variance of the values that are not NaN.
+///
+/// ```nabi
+/// assert(stats::nan::var([1.0, f64::NAN, 3.0]) == 1.0);
+/// ```
+pub fn var<X: Sample>(x: X, ddof: usize = 0) -> f64 { var_of(x.values().without_nan(), ddof) }
+
+/// The standard deviation of the values that are not NaN.
+///
+/// ```nabi
+/// assert(stats::nan::std([1.0, f64::NAN, 3.0], ddof: 1) == 2.0.sqrt());
+/// ```
+pub fn std<X: Sample>(x: X, ddof: usize = 0) -> f64 { var_of(x.values().without_nan(), ddof).sqrt() }
+
+/// The median of the values that are not NaN.
+///
+/// ```nabi
+/// assert(stats::nan::median([f64::NAN, 4.0, 1.0, 2.0]) == 2.0);
+/// ```
+pub fn median<X: Sample>(x: X) -> f64 { median_of(x.values().without_nan()) }
+
+/// The `q`-quantile of the values that are not NaN.
+///
+/// ```nabi
+/// assert(try stats::nan::quantile([f64::NAN, 1.0, 2.0, 3.0], 0.5) == 2.0);
+/// ```
+pub fn quantile<X: Sample>(x: X, q: f64, method: QuantileMethod = QuantileMethod::Linear) throws (StatsError) -> f64 {
+    try arg(q >= 0.0 && q <= 1.0, f"nan::quantile: q = {q} is outside [0, 1]");
+    let v = x.values().without_nan();
+    if v.n == 0 { return f64::NAN; }
+    select_q(kernel::copy(v.d, 0, v.n), v.n, q, method)
+}
+
+/// The smallest value that is not NaN.
+///
+/// ```nabi
+/// assert(stats::nan::min([f64::NAN, 4.0, 1.0]) == 1.0);
+/// ```
+pub fn min<X: Sample>(x: X) -> f64 {
+    let v = x.values().without_nan();
+    kernel::minmax(v.d, 0, v.n).0
+}
+
+/// The largest value that is not NaN.
+///
+/// ```nabi
+/// assert(stats::nan::max([f64::NAN, 4.0, 1.0]) == 4.0);
+/// ```
+pub fn max<X: Sample>(x: X) -> f64 {
+    let v = x.values().without_nan();
+    kernel::minmax(v.d, 0, v.n).1
+}

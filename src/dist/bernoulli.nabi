@@ -1,0 +1,62 @@
+// The Bernoulli distribution on {0, 1}.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::descriptive::mean_of;
+use pkg::dist::{Discrete, Distribution, check, draw};
+use pkg::error::{arg, need};
+use std::random::Rng;
+
+/// The Bernoulli distribution: 1 with probability `p`, else 0.
+///
+/// ```nabi
+/// use stats::{Bernoulli, Discrete};
+///
+/// let d = try Bernoulli::new(0.3);
+/// assert(d.pmf(1) == 0.3 && d.cdf(0) == 0.7 && d.var() == 0.21);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Bernoulli {
+    pub(pkg) p: f64;
+}
+
+impl Bernoulli {
+    /// Bernoulli(p), `0 <= p <= 1`.
+    pub fn new(p: f64) throws (StatsError) -> Bernoulli {
+        try check(p >= 0.0 && p <= 1.0, f"Bernoulli: p = {p}; a probability must be in [0, 1]");
+        Bernoulli { p: p }
+    }
+
+    /// The probability of 1.
+    pub fn p(self) -> f64 { self.p }
+
+    /// The maximum-likelihood fit: the share of ones. Values must be 0
+    /// or 1.
+    ///
+    /// ```nabi
+    /// assert((try stats::Bernoulli::fit([1, 0, 0, 1])).p() == 0.5);
+    /// ```
+    pub fn fit<X: Sample>(x: X) throws (StatsError) -> Bernoulli {
+        let v = x.values();
+        try need("Bernoulli::fit", 1, v.n);
+        for i in 0..v.n { try arg(v.at(i) == 0.0 || v.at(i) == 1.0, f"Bernoulli::fit: value {i} is {v.at(i)}; values must be 0 or 1"); }
+        try Bernoulli::new(mean_of(v))
+    }
+}
+
+impl Distribution for Bernoulli {
+    type Value = i64;
+    fn sample<G: Rng>(self, ref g: G) -> i64 { if draw::uniform(ref g) < self.p { 1 } else { 0 } }
+}
+
+impl Discrete for Bernoulli {
+    fn pmf(self, k: i64) -> f64 { if k == 1 { self.p } else if k == 0 { 1.0 - self.p } else { 0.0 } }
+    fn cdf(self, k: i64) -> f64 { if k < 0 { 0.0 } else if k == 0 { 1.0 - self.p } else { 1.0 } }
+    fn sf(self, k: i64) -> f64 { if k < 0 { 1.0 } else if k == 0 { self.p } else { 0.0 } }
+    fn ppf(self, q: f64) -> i64 {
+        if !(q >= 0.0 && q <= 1.0) { return i64::MIN; }
+        if q <= 1.0 - self.p { 0 } else { 1 }
+    }
+    fn mean(self) -> f64 { self.p }
+    fn var(self) -> f64 { self.p * (1.0 - self.p) }
+}

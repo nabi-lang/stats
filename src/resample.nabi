@@ -1,0 +1,137 @@
+// Bootstrap confidence intervals for a statistic of one sample.
+
+use pkg::data::{Sample, Values, vector};
+use pkg::descriptive::order::{QuantileMethod, select_q};
+use pkg::error::{arg, finite, need};
+use pkg::kernel;
+use pkg::{Interval, StatsError};
+use core::array::Vector;
+use specfun::{ndtr, ndtri};
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+/// How `bootstrap` turns the replicates into an interval.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// ```nabi
+/// use core::array::Vector;
+/// use stats::BootMethod;
+///
+/// let x = [1.0, 2.0, 3.0, 4.0, 10.0];
+/// let b = try stats::bootstrap(x, |v: Vector<f64>| -> f64 { stats::median(v) }, 1000, 90pct, BootMethod::Percentile);
+/// assert(b.ci.lo <= 3.0 && 3.0 <= b.ci.hi);
+/// ```
+pub enum BootMethod {
+    /// The quantiles of the replicates.
+    Percentile,
+    /// The percentile interval reflected about the estimate (`2 theta -
+    /// q`), the "basic" bootstrap.
+    Basic,
+    /// Bias-corrected and accelerated (Efron 1987): the percentile
+    /// interval shifted by the median bias of the replicates and scaled
+    /// by the jackknife acceleration. Second-order accurate; the default.
+    Bca,
+}
+
+/// The outcome of `bootstrap`.
+#[derive(Clone, PartialEq, Debug)]
+///
+/// ```nabi
+/// use core::array::Vector;
+///
+/// let b = try stats::bootstrap([1.0, 2.0, 3.0, 4.0], |v: Vector<f64>| -> f64 { stats::mean(v) }, 500);
+/// assert(b.replicates.len() == 500 && b.estimate == 2.5);
+/// ```
+pub struct Bootstrap {
+    /// The statistic of the sample itself.
+    pub estimate: f64;
+    /// The standard deviation of the replicates (`ddof = 1`).
+    pub se: f64;
+    /// `mean(replicates) - estimate`.
+    pub bias: f64;
+    /// The confidence interval.
+    pub ci: Interval;
+    /// The statistic of each resample.
+    pub replicates: Vector<f64>;
+}
+
+/// A bootstrap confidence interval at `level` for `stat` of the sample
+/// `x`: `resamples` resamples with replacement drawn from a
+/// Xoshiro256++ stream seeded with `seed` (so the result repeats), the
+/// interval by `method` (default BCa, which also evaluates `stat` on the
+/// `n` leave-one-out samples). Throws `TooFew` below 2 values,
+/// `InvalidArgument` for a level outside (0, 1) or fewer than 2
+/// resamples.
+///
+/// ```nabi
+/// use core::array::Vector;
+///
+/// let x = [2.1, 3.4, 1.9, 5.6, 4.4, 3.3, 2.8, 4.1, 3.9, 2.5];
+/// let b = try stats::bootstrap(x, |v: Vector<f64>| -> f64 { stats::mean(v) }, 2000, 95pct);
+/// assert(b.estimate in b.ci && b.ci.lo > 2.5 && b.ci.hi < 4.3);
+/// ```
+pub fn bootstrap<X: Sample>(x: X, stat: fn(Vector<f64>) -> f64, resamples: usize = 9999, level: f64 = 0.95, method: BootMethod = BootMethod::Bca, seed: u64 = 0) throws (StatsError) -> Bootstrap {
+    let v = x.values();
+    try need("bootstrap", 2, v.n);
+    try finite("bootstrap", v);
+    try arg(level > 0.0 && level < 1.0, f"bootstrap: level = {level}; give a confidence level in (0, 1), e.g. 95pct");
+    try arg(resamples >= 2, f"bootstrap: {resamples} resamples; ask for at least 2 (thousands for an interval)");
+    let n = v.n;
+    let theta = stat(v.to_vector());
+    let g = Xoshiro256PlusPlus::seed(seed);
+    let reps = Values::new(resamples);
+    let tmp = kernel::buf::<f64>(n);
+    for b in 0..resamples {
+        unsafe {
+            for i in 0..n { tmp.set(i, v.at(g.below(n as u64) as usize)); }
+            reps.d.set(b, stat(vector(tmp, 0, n)));
+        }
+    }
+    let mr = kernel::sum(reps.d, 0, resamples) / resamples as f64;
+    let se = pkg::descriptive::var_of(reps, 1).sqrt();
+    let alpha = 0.5 * (1.0 - level);
+    let q = |p: f64| -> f64 { select_q(kernel::copy(reps.d, 0, resamples), resamples, p.clamp(0.0, 1.0), QuantileMethod::Linear) };
+    let ci = match method {
+        BootMethod::Percentile => Interval { lo: q(alpha), hi: q(1.0 - alpha) },
+        BootMethod::Basic => Interval { lo: 2.0 * theta - q(1.0 - alpha), hi: 2.0 * theta - q(alpha) },
+        BootMethod::Bca => {
+            let below = 0usize;
+            for b in 0..resamples {
+                if reps.at(b) < theta { below += 1; }
+            }
+            let z0 = ndtri(below as f64 / resamples as f64);
+            // The acceleration from the jackknife values.
+            let jack = Values::new(n);
+            let loo = kernel::buf::<f64>(n);
+            for i in 0..n {
+                let k = 0usize;
+                unsafe {
+                    for j in 0..n {
+                        if j != i {
+                            loo.set(k, v.at(j));
+                            k += 1;
+                        }
+                    }
+                    jack.d.set(i, stat(vector(loo, 0, n - 1)));
+                }
+            }
+            let jm = kernel::sum(jack.d, 0, n) / n as f64;
+            let (num, den) = (0.0, 0.0);
+            for i in 0..n {
+                let d = jm - jack.at(i);
+                num += d * d * d;
+                den += d * d;
+            }
+            let a = if den > 0.0 { num / (6.0 * den * den.sqrt()) } else { 0.0 };
+            let adj = |p: f64| -> f64 {
+                let z = z0 + ndtri(p);
+                ndtr(z0 + z / (1.0 - a * z))
+            };
+            if !z0.is_finite() {
+                Interval { lo: q(alpha), hi: q(1.0 - alpha) }
+            } else {
+                Interval { lo: q(adj(alpha)), hi: q(adj(1.0 - alpha)) }
+            }
+        }
+    };
+    Bootstrap { estimate: theta, se: se, bias: mr - theta, ci: ci, replicates: reps.to_vector() }
+}

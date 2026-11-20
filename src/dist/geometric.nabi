@@ -1,0 +1,81 @@
+// The geometric distribution: trials up to and including the first success.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::descriptive::mean_of;
+use pkg::dist::{Discrete, Distribution, check, draw};
+use pkg::error::{arg, need};
+use std::random::Rng;
+
+/// The geometric distribution on 1, 2, 3, ...: the number of trials of
+/// probability `p` up to and including the first success (SciPy's
+/// `geom`). `P(X = k) = (1 - p)^(k - 1) p`.
+///
+/// ```nabi
+/// use stats::{Discrete, Geometric};
+///
+/// let d = try Geometric::new(0.25);
+/// assert(d.pmf(2) == 0.1875 && d.mean() == 4.0);
+/// assert(d.ppf(0.25) == 1 && d.ppf(0.4375) == 2);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Geometric {
+    pub(pkg) p: f64;
+}
+
+impl Geometric {
+    /// Geometric(p), `0 < p <= 1`.
+    pub fn new(p: f64) throws (StatsError) -> Geometric {
+        try check(p > 0.0 && p <= 1.0, f"Geometric: p = {p}; the success probability must be in (0, 1]");
+        Geometric { p: p }
+    }
+
+    /// The success probability.
+    pub fn p(self) -> f64 { self.p }
+
+    /// The maximum-likelihood fit `p = 1 / mean(x)`; values are trial
+    /// counts >= 1.
+    ///
+    /// ```nabi
+    /// assert((try stats::Geometric::fit([1, 3, 4])).p() == 0.375);
+    /// ```
+    pub fn fit<X: Sample>(x: X) throws (StatsError) -> Geometric {
+        let v = x.values();
+        try need("Geometric::fit", 1, v.n);
+        for i in 0..v.n {
+            let k = v.at(i);
+            try arg(k >= 1.0 && k == k.floor() && k.is_finite(), f"Geometric::fit: value {i} is {k}; values are trial counts, whole numbers >= 1");
+        }
+        try Geometric::new(1.0 / mean_of(v))
+    }
+
+    fn lq(self) -> f64 { (-self.p).ln_1p() }
+}
+
+impl Distribution for Geometric {
+    type Value = i64;
+    fn sample<G: Rng>(self, ref g: G) -> i64 {
+        if self.p == 1.0 { return 1; }
+        (draw::open01(ref g).ln() / self.lq()).floor() as i64 + 1
+    }
+}
+
+impl Discrete for Geometric {
+    fn pmf(self, k: i64) -> f64 { if k < 1 { 0.0 } else { ((k - 1) as f64 * self.lq()).exp() * self.p } }
+    fn cdf(self, k: i64) -> f64 { if k < 1 { 0.0 } else { -(k as f64 * self.lq()).exp_m1() } }
+    fn sf(self, k: i64) -> f64 { if k < 1 { 1.0 } else { (k as f64 * self.lq()).exp() } }
+    fn ppf(self, q: f64) -> i64 {
+        if !(q >= 0.0 && q <= 1.0) { return i64::MIN; }
+        if q == 0.0 || self.p == 1.0 { return 1; }
+        if q == 1.0 { return i64::MAX; }
+        let k = ((-q).ln_1p() / self.lq()).ceil();
+        let k = if k < 1.0 { 1i64 } else { k as i64 };
+        // Rounding can land one off either way.
+        let slack = q * (1.0 - 1e-14);
+        if k > 1 && self.cdf(k - 1) >= slack { k -= 1; }
+        if self.cdf(k) < slack { k += 1; }
+        k
+    }
+    fn mean(self) -> f64 { 1.0 / self.p }
+    fn var(self) -> f64 { (1.0 - self.p) / (self.p * self.p) }
+}

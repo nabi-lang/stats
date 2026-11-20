@@ -1,0 +1,226 @@
+// Histograms: bin edges by a count, a width, explicit edges or one of
+// NumPy's rules (`numpy.histogram_bin_edges`), and the counts in them.
+
+use pkg::StatsError;
+use pkg::data::{Sample, Values};
+use pkg::descriptive::order::iqr_of;
+use pkg::descriptive::{skew_of, var_of};
+use pkg::error::arg;
+use pkg::kernel;
+use core::array::{Array, Vector};
+
+/// How `histogram` and `bin_edges` choose the bins. The rules are
+/// NumPy's, with the same results: each gives a bin width, and the
+/// range is cut into `ceil(range / width)` equal bins.
+///
+/// ```nabi
+/// use stats::Bins;
+///
+/// let x = [1.0, 2.0, 2.0, 3.0, 4.0];
+/// assert((try stats::bin_edges(x, Bins::Count(3))).len() == 4);
+/// assert((try stats::histogram(x, Bins::Width(1.0))).counts[1] == 2);
+/// ```
+#[derive(Clone, PartialEq, Debug)]
+pub enum Bins {
+    /// This many equal bins over the data's range.
+    Count(usize),
+    /// Bins of this width from the minimum.
+    Width(f64),
+    /// These edges, rising (bins `[e0, e1), ..., [e_n-1, e_n]`).
+    Edges(Vector<f64>),
+    /// The smaller width of `Sturges` and `Fd` (NumPy's default
+    /// estimator `"auto"`).
+    Auto,
+    /// `range / (log2(n) + 1)`: for small, roughly normal data.
+    Sturges,
+    /// Scott (1979): `(24 sqrt(pi) / n)^(1/3) * std`.
+    Scott,
+    /// Freedman and Diaconis (1981): `2 iqr / n^(1/3)`; robust to
+    /// outliers.
+    Fd,
+    /// `range / sqrt(n)`.
+    Sqrt,
+    /// `range / (2 n^(1/3))`.
+    Rice,
+    /// Doane (1976): Sturges corrected for skewness.
+    Doane,
+}
+
+/// Counts of values in bins: `counts[i]` values fell in `[edges[i],
+/// edges[i + 1])`, the last bin closed on the right.
+#[derive(Clone, PartialEq, Debug)]
+///
+/// ```nabi
+/// let h = try stats::histogram([0.5, 1.5, 1.7, 2.5], stats::Bins::Count(2));
+/// assert(h.counts.to_list() == [1, 3] && h.edges.to_list() == [0.5, 1.5, 2.5]);
+/// ```
+pub struct Histogram {
+    /// The number of values in each bin.
+    pub counts: Array<i64, 1>;
+    /// The `len(counts) + 1` bin edges, rising.
+    pub edges: Vector<f64>;
+}
+
+impl Histogram {
+    /// The number of bins.
+    pub fn len(self) -> usize { self.counts.len() }
+
+    /// The density in each bin: `count / (total * width)`, which
+    /// integrates to 1 over the range.
+    ///
+    /// ```nabi
+    /// let h = try stats::histogram([1.0, 2.0, 3.0, 4.0], stats::Bins::Count(2));
+    /// assert(h.density()[0] == 1.0 / 3.0);
+    /// ```
+    pub fn density(self) -> Vector<f64> {
+        let total = 0.0;
+        for c in self.counts { total += c as f64; }
+        let n = self.counts.len();
+        let out: List<f64> = List::from_fn(n, |i| self.counts[i] as f64 / (total * (self.edges[i + 1] - self.edges[i])));
+        Array::view_list(out, [n])
+    }
+
+    /// The midpoints of the bins.
+    ///
+    /// ```nabi
+    /// let h = try stats::histogram([0.0, 1.0, 2.0, 4.0], stats::Bins::Count(2));
+    /// assert(h.centers().to_list() == [1.0, 3.0]);
+    /// ```
+    pub fn centers(self) -> Vector<f64> {
+        let n = self.counts.len();
+        let out: List<f64> = List::from_fn(n, |i| 0.5 * (self.edges[i] + self.edges[i + 1]));
+        Array::view_list(out, [n])
+    }
+}
+
+fn without_nan(v: Values) -> Values {
+    let out = Values::new(v.n);
+    let k = 0usize;
+    for i in 0..v.n {
+        let x = v.at(i);
+        if x.is_finite() {
+            unsafe { out.d.set(k, x); }
+            k += 1;
+        }
+    }
+    Values { d: out.d, n: k }
+}
+
+fn linspace(lo: f64, hi: f64, bins: usize) -> Vector<f64> { core::array::linspace(lo, hi, bins + 1) }
+
+fn edges_of(v: Values, bins: Bins) throws (StatsError) -> Vector<f64> {
+    if let Bins::Edges(e) = bins {
+        try arg(e.len() >= 2, "bin_edges: Edges needs at least 2 edges");
+        for i in 1..e.len() { try arg(e[i] > e[i - 1], f"bin_edges: edge {i} is not above edge {i - 1}; edges must rise"); }
+        return e;
+    }
+    let f = without_nan(v);
+    let n = f.n;
+    let (lo, hi) = if n == 0 { (0.0, 1.0) } else { kernel::minmax(f.d, 0, n) };
+    if lo == hi {
+        lo -= 0.5;
+        hi += 0.5;
+    }
+    let range = hi - lo;
+    let nf = n as f64;
+    let width = |b: Bins| -> f64 {
+        if n == 0 { return 0.0; }
+        match b {
+            Bins::Sturges => range / (nf.log2() + 1.0),
+            Bins::Sqrt => range / nf.sqrt(),
+            Bins::Rice => range / (2.0 * nf.cbrt()),
+            Bins::Scott => (24.0 * 3.141592653589793.sqrt() / nf).cbrt() * var_of(f, 0).sqrt(),
+            Bins::Fd => 2.0 * iqr_of(f) * nf.powi(-1).cbrt(),
+            Bins::Doane => {
+                if n <= 2 { return 0.0; }
+                let sg1 = (6.0 * (nf - 2.0) / ((nf + 1.0) * (nf + 3.0))).sqrt();
+                let g1 = skew_of(f, 0, n, true);
+                range / (1.0 + nf.log2() + (1.0 + g1.abs() / sg1).log2())
+            }
+            _ => 0.0,
+        }
+    };
+    let count = match bins {
+        Bins::Count(k) => {
+            try arg(k >= 1, "bin_edges: Count(0); ask for at least one bin");
+            k
+        }
+        Bins::Width(w) => {
+            try arg(w > 0.0 && w.is_finite(), f"bin_edges: Width({w}); the width must be finite and > 0");
+            (range / w).ceil().max(1.0) as usize
+        }
+        Bins::Auto => {
+            let fd = width(Bins::Fd);
+            let st = width(Bins::Sturges);
+            let w = if fd > 0.0 { fd.min(st) } else { st };
+            if w > 0.0 { (range / w).ceil() as usize } else { 1usize }
+        }
+        _ => {
+            let w = width(bins);
+            if w > 0.0 { (range / w).ceil() as usize } else { 1usize }
+        }
+    };
+    if let Bins::Width(w) = bins {
+        let out: List<f64> = List::from_fn(count + 1, |i| lo + i as f64 * w);
+        return Array::view_list(out, [count + 1]);
+    }
+    linspace(lo, hi, count)
+}
+
+/// The bin edges `histogram` would use for `x` (NaN and infinities
+/// ignored). Throws `InvalidArgument` for an empty count, a width that
+/// is not positive, or edges that do not rise.
+///
+/// ```nabi
+/// let e = try stats::bin_edges([0.0, 1.0, 2.0, 3.0, 4.0], stats::Bins::Sturges);
+/// assert(e.len() == 5 && e[0] == 0.0 && e[4] == 4.0);
+/// ```
+pub fn bin_edges<X: Sample>(x: X, bins: Bins = Bins::Auto) throws (StatsError) -> Vector<f64> { try edges_of(x.values(), bins) }
+
+/// The histogram of `x` over `bins` (default `Auto`): values outside
+/// the edges and NaN are not counted; the last bin includes its right
+/// edge. Bins of equal width are found by arithmetic, explicit edges
+/// by binary search. O(n log bins).
+///
+/// ```nabi
+/// use core::array::Array;
+///
+/// let h = try stats::histogram([1.0, 2.0, 2.0, 3.0, 4.0], stats::Bins::Count(3));
+/// assert(h.counts == Array::<i64, 1>::from([1, 2, 2]));
+/// ```
+pub fn histogram<X: Sample>(x: X, bins: Bins = Bins::Auto) throws (StatsError) -> Histogram {
+    let v = x.values();
+    let uniform = match bins {
+        Bins::Edges(_) => false,
+        _ => true,
+    };
+    let e = try edges_of(v, bins);
+    let k = e.len() - 1;
+    let ev = Sample::values(e);
+    let counts = kernel::buf::<i64>(k);
+    let (lo, hi) = (ev.at(0), ev.at(k));
+    let w = (hi - lo) / k as f64;
+    for i in 0..v.n {
+        let t = v.at(i);
+        if !(t >= lo && t <= hi) { continue; }
+        let b = if uniform {
+            let j = ((t - lo) / w) as usize;
+            if j >= k { k - 1 } else { j }
+        } else {
+            // The last edge e_j <= t.
+            let (a, c) = (0usize, k);
+            while c - a > 1 {
+                let m = (a + c) / 2;
+                if ev.at(m) <= t { a = m; } else { c = m; }
+            }
+            a
+        };
+        // Rounding in (t - lo) / w can land one bin off; the edges decide.
+        if uniform {
+            if b > 0 && t < ev.at(b) { b -= 1; } else if b + 1 < k && t >= ev.at(b + 1) { b += 1; }
+        }
+        unsafe { counts.set(b, counts.get(b) + 1); }
+    }
+    let c: List<i64> = List::from_fn(k, |i| unsafe { counts.get(i) });
+    Histogram { counts: Array::view_list(c, [k]), edges: e }
+}

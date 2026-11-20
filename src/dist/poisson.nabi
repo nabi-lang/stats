@@ -1,0 +1,87 @@
+// The Poisson distribution with mean lambda.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::descriptive::mean_of;
+use pkg::dist::{Discrete, Distribution, check, draw, search};
+use pkg::error::{arg, need};
+use specfun::ndtri;
+use specfun::{gammainc_factor as gamma_prefix, gammainc_pq as gamma_pq};
+use std::random::Rng;
+
+/// The Poisson distribution with mean `lambda >= 0`. PMF `lambda^k
+/// e^-lambda / k!` through the incomplete gamma function's factor, CDF
+/// `Q(k + 1, lambda)`; draws by search below 10 and PTRS above.
+///
+/// ```nabi
+/// use stats::{Discrete, Poisson};
+///
+/// let d = try Poisson::new(4.0);
+/// assert((d.pmf(2) - 8.0 * (-4.0).exp()).abs() < 1e-16);
+/// assert(d.ppf(0.5) == 4);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Poisson {
+    pub(pkg) lam: f64;
+}
+
+impl Poisson {
+    /// Poisson(lambda), `lambda` finite and >= 0.
+    pub fn new(lambda: f64) throws (StatsError) -> Poisson {
+        try check(lambda >= 0.0 && lambda.is_finite(), f"Poisson: lambda = {lambda}; the mean must be finite and >= 0");
+        Poisson { lam: lambda }
+    }
+
+    /// The mean.
+    pub fn lambda(self) -> f64 { self.lam }
+
+    /// The maximum-likelihood fit: the mean of the counts.
+    ///
+    /// ```nabi
+    /// assert((try stats::Poisson::fit([1, 2, 6])).lambda() == 3.0);
+    /// ```
+    pub fn fit<X: Sample>(x: X) throws (StatsError) -> Poisson {
+        let v = x.values();
+        try need("Poisson::fit", 1, v.n);
+        for i in 0..v.n {
+            let k = v.at(i);
+            try arg(k >= 0.0 && k == k.floor() && k.is_finite(), f"Poisson::fit: count {i} is {k}; counts must be whole numbers >= 0");
+        }
+        try Poisson::new(mean_of(v))
+    }
+}
+
+impl Distribution for Poisson {
+    type Value = i64;
+    fn sample<G: Rng>(self, ref g: G) -> i64 { draw::poisson(ref g, self.lam) }
+}
+
+impl Discrete for Poisson {
+    fn pmf(self, k: i64) -> f64 {
+        if k < 0 { return 0.0; }
+        if self.lam == 0.0 { return if k == 0 { 1.0 } else { 0.0 }; }
+        if k == 0 { return (-self.lam).exp(); }
+        gamma_prefix((k + 1) as f64, self.lam) / self.lam
+    }
+    fn logpmf(self, k: i64) -> f64 {
+        if k < 0 { return f64::NEG_INFINITY; }
+        if self.lam == 0.0 { return if k == 0 { 0.0 } else { f64::NEG_INFINITY }; }
+        k as f64 * self.lam.ln() - self.lam - specfun::lgamma((k + 1) as f64)
+    }
+    fn cdf(self, k: i64) -> f64 {
+        if k < 0 { return 0.0; }
+        if self.lam == 0.0 { return 1.0; }
+        gamma_pq((k + 1) as f64, self.lam).1
+    }
+    fn sf(self, k: i64) -> f64 {
+        if k < 0 { return 1.0; }
+        if self.lam == 0.0 { return 0.0; }
+        gamma_pq((k + 1) as f64, self.lam).0
+    }
+    fn ppf(self, q: f64) -> i64 {
+        let s = self.lam.sqrt();
+        search(self, q, self.lam + s * ndtri(q.clamp(1e-300, 1.0 - 1e-16)), 0, i64::MAX)
+    }
+    fn mean(self) -> f64 { self.lam }
+    fn var(self) -> f64 { self.lam }
+}

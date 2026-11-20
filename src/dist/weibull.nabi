@@ -1,0 +1,69 @@
+// The Weibull distribution with shape k and scale lambda.
+
+use pkg::StatsError;
+use pkg::dist::{Continuous, Distribution, check, draw};
+use specfun::gamma;
+use std::random::Rng;
+
+/// The Weibull distribution with shape `k > 0` and scale `lambda > 0`:
+/// `P(X > x) = e^(-(x / lambda)^k)` (SciPy's `weibull_min`).
+///
+/// ```nabi
+/// use stats::{Continuous, Weibull};
+///
+/// let d = try Weibull::new(2.0, 1.0);
+/// assert((d.sf(1.0) - (-1.0).exp()).abs() < 1e-16);
+/// assert((d.mean() - 0.8862269254527579).abs() < 1e-15);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Weibull {
+    pub(pkg) k: f64;
+    pub(pkg) lambda: f64;
+}
+
+impl Weibull {
+    /// Weibull(k, lambda); both finite and positive.
+    pub fn new(k: f64, lambda: f64) throws (StatsError) -> Weibull {
+        try check(k > 0.0 && k.is_finite() && lambda > 0.0 && lambda.is_finite(), f"Weibull: k = {k}, lambda = {lambda}; the shape and the scale must be finite and > 0");
+        Weibull { k: k, lambda: lambda }
+    }
+
+    /// The shape.
+    pub fn shape(self) -> f64 { self.k }
+
+    /// The scale.
+    pub fn scale(self) -> f64 { self.lambda }
+}
+
+impl Distribution for Weibull {
+    type Value = f64;
+    fn sample<G: Rng>(self, ref g: G) -> f64 { self.lambda * draw::exponential(ref g).pow(1.0 / self.k) }
+}
+
+impl Continuous for Weibull {
+    fn pdf(self, x: f64) -> f64 {
+        if x < 0.0 { return 0.0; }
+        if x == 0.0 { return if self.k < 1.0 { f64::INFINITY } else if self.k == 1.0 { 1.0 / self.lambda } else { 0.0 }; }
+        self.logpdf(x).exp()
+    }
+    fn logpdf(self, x: f64) -> f64 {
+        if x < 0.0 { return f64::NEG_INFINITY; }
+        let z = x / self.lambda;
+        (self.k / self.lambda).ln() + (self.k - 1.0) * z.ln() - z.pow(self.k)
+    }
+    fn cdf(self, x: f64) -> f64 { if x <= 0.0 { 0.0 } else { -(-(x / self.lambda).pow(self.k)).exp_m1() } }
+    fn sf(self, x: f64) -> f64 { if x <= 0.0 { 1.0 } else { (-(x / self.lambda).pow(self.k)).exp() } }
+    fn ppf(self, p: f64) -> f64 {
+        if !(p >= 0.0 && p <= 1.0) { return f64::NAN; }
+        self.lambda * (-(-p).ln_1p()).pow(1.0 / self.k)
+    }
+    fn isf(self, q: f64) -> f64 {
+        if !(q >= 0.0 && q <= 1.0) { return f64::NAN; }
+        self.lambda * (-q.ln()).pow(1.0 / self.k)
+    }
+    fn mean(self) -> f64 { self.lambda * gamma(1.0 + 1.0 / self.k) }
+    fn var(self) -> f64 {
+        let g1 = gamma(1.0 + 1.0 / self.k);
+        self.lambda * self.lambda * (gamma(1.0 + 2.0 / self.k) - g1 * g1)
+    }
+}

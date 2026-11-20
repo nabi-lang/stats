@@ -1,0 +1,163 @@
+// Logistic regression by iteratively reweighted least squares.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::error::{arg, finite, from_linalg, need, same};
+use pkg::hypothesis::{Alternative, z_pvalue};
+use pkg::regress::linear::design;
+use core::array::{Array, Matrix, Vector};
+
+/// A fitted logistic regression `P(y = 1 | x) = 1 / (1 + e^-(x b))`.
+///
+/// ```nabi
+/// use core::array::{Matrix, Vector};
+///
+/// let x: Matrix<f64> = [[0.5], [1.0], [1.5], [2.0], [2.5], [3.0], [3.5], [4.0]];
+/// let y: Vector<f64> = [0, 0, 1, 0, 1, 0, 1, 1];
+/// let m = try stats::logistic(x, y);
+/// assert(m.converged && m.coef[1] > 0.0);
+/// ```
+#[derive(Clone, PartialEq, Debug)]
+pub struct Logistic {
+    /// The coefficients (the intercept first, if fitted).
+    pub coef: Vector<f64>;
+    /// Their standard errors from the inverse Fisher information.
+    pub se: Vector<f64>;
+    /// `coef / se` (Wald statistics).
+    pub z: Vector<f64>;
+    /// The two-sided Wald p-values.
+    pub p: Vector<f64>;
+    /// The maximized log-likelihood.
+    pub loglik: f64;
+    /// The residual deviance `-2 loglik`.
+    pub deviance: f64;
+    /// The deviance of the intercept-only model (or of `p = 1/2` without
+    /// an intercept).
+    pub null_deviance: f64;
+    /// Newton (IRLS) steps taken.
+    pub iterations: usize;
+    /// Whether the steps met the tolerance before `max_iter`.
+    pub converged: bool;
+    /// Whether `coef[0]` is an intercept.
+    pub intercept: bool;
+}
+
+/// `1 / (1 + e^-t)` without overflow.
+fn sigmoid(t: f64) -> f64 {
+    if t >= 0.0 { 1.0 / (1.0 + (-t).exp()) } else {
+        let e = t.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// `ln(1 + e^t)` without overflow.
+fn softplus(t: f64) -> f64 { if t > 0.0 { t + (-t).exp().ln_1p() } else { t.exp().ln_1p() } }
+
+impl Logistic {
+    /// `P(y = 1)` for new rows `x` (without the intercept column).
+    ///
+    /// ```nabi
+    /// use core::array::{Matrix, Vector};
+    ///
+    /// let x: Matrix<f64> = [[1], [2], [3], [4], [5], [6]];
+    /// let y: Vector<f64> = [0, 0, 1, 0, 1, 1];
+    /// let m = try stats::logistic(x, y);
+    /// let new: Matrix<f64> = [[3.5]];
+    /// assert((try m.predict_proba(new))[0] > 0.4);
+    /// ```
+    pub fn predict_proba(self, x: Matrix<f64>) throws (StatsError) -> Vector<f64> {
+        let d = design(x, self.intercept);
+        try same("Logistic::predict_proba: columns and coefficients", d.shape()[1], self.coef.len());
+        let eta = try! linalg::matvec(d, self.coef);
+        eta.map(sigmoid)
+    }
+}
+
+/// Logistic regression of 0/1 outcomes `y` on the columns of `x` by
+/// Newton's method in its IRLS form (McCullagh and Nelder 1989): each
+/// step solves `X^T W X d = X^T (y - mu)` by Cholesky (linalg), from b
+/// = 0, until no coefficient moves more than `tol` (relative) or
+/// `max_iter` steps. Throws `InvalidArgument` for outcomes other than 0
+/// and 1 or for perfectly separated data (the estimates would be
+/// infinite), `Singular` for collinear columns.
+///
+/// ```nabi
+/// use core::array::{Matrix, Vector};
+///
+/// let x: Matrix<f64> = [[1], [2], [3], [4], [5], [6]];
+/// let y: Vector<f64> = [0, 0, 1, 0, 1, 1];
+/// let m = try stats::logistic(x, y);
+/// // statsmodels: Logit(y, add_constant(x)).fit().params[1]
+/// assert((m.coef[1] - 1.2140275858514205).abs() < 1e-12);
+/// ```
+pub fn logistic(x: Matrix<f64>, y: Vector<f64>, intercept: bool = true, max_iter: usize = 100, tol: f64 = 1e-10) throws (StatsError) -> Logistic {
+    let d = design(x, intercept);
+    let s = d.shape();
+    let (n, k) = (s[0], s[1]);
+    try same("logistic: the rows of x and the length of y", n, y.len());
+    try need("logistic", k + 1, n);
+    try finite("logistic", Sample::values(x));
+    let ones = 0.0;
+    for i in 0..n {
+        let t = y[i];
+        try arg(t == 0.0 || t == 1.0, f"logistic: y[{i}] = {t}; outcomes must be 0 or 1");
+        ones += t;
+    }
+    try arg(ones > 0.0 && ones < n as f64, "logistic: every outcome is the same; both 0 and 1 must occur");
+    let b: Vector<f64> = Array::zeros([k]);
+    let converged = false;
+    let it = 0usize;
+    let info: Matrix<f64> = Array::zeros([k, k]);
+    while it < max_iter {
+        it += 1;
+        let eta = try! linalg::matvec(d, b);
+        let mu = eta.map(sigmoid);
+        let w = mu .* (1.0 .- mu);
+        let xw = d .* w[:, none];
+        info = try! linalg::matmul(d.t(), xw);
+        let g = try! linalg::matvec(d.t(), y .- mu);
+        let c = try linalg::cholesky(info) catch e: linalg::LinalgError { throw from_linalg("logistic: X^T W X", e); };
+        let step = try c.solve(g) catch e: linalg::LinalgError { throw from_linalg("logistic: X^T W X", e); };
+        b = b .+ step;
+        let big = 0.0;
+        for i in 0..k {
+            let r = step[i].abs() / (1.0 + b[i].abs());
+            big = big.max(r);
+            if b[i].abs() > 50.0 && step[i].abs() > 1.0 {
+                throw StatsError::InvalidArgument { what: "logistic: the data are perfectly separated (a combination of predictors splits 0s from 1s), so the estimates are infinite; drop the separating predictor or add data" };
+            }
+        }
+        if big <= tol {
+            converged = true;
+            break;
+        }
+    }
+    let eta = try! linalg::matvec(d, b);
+    let ll = 0.0;
+    for i in 0..n {
+        let e = eta[i];
+        ll += y[i] * e - softplus(e);
+    }
+    let pbar = if intercept { ones / n as f64 } else { 0.5 };
+    let null = -2.0 * (ones * pbar.ln() + (n as f64 - ones) * (1.0 - pbar).ln());
+    let mu = eta.map(sigmoid);
+    let w = mu .* (1.0 .- mu);
+    info = try! linalg::matmul(d.t(), d .* w[:, none]);
+    let inv = try (try linalg::cholesky(info)).inv() catch e: linalg::LinalgError { throw from_linalg("logistic: X^T W X", e); };
+    let se_l: List<f64> = List::from_fn(k, |i| inv[i, i].sqrt());
+    let se: Vector<f64> = Array::view_list(se_l, [k]);
+    let z = b ./ se;
+    let p_l: List<f64> = List::from_fn(k, |i| z_pvalue(z[i], Alternative::TwoSided));
+    Logistic {
+        coef: b,
+        se: se,
+        z: z,
+        p: Array::view_list(p_l, [k]),
+        loglik: ll,
+        deviance: -2.0 * ll,
+        null_deviance: null,
+        iterations: it,
+        converged: converged,
+        intercept: intercept,
+    }
+}

@@ -1,0 +1,94 @@
+// The binomial distribution: successes in n Bernoulli(p) trials.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::dist::{Discrete, Distribution, check, draw, search};
+use pkg::error::{arg, need};
+use pkg::kernel;
+use specfun::ndtri;
+use specfun::{betainc_factor as beta_prefix, betainc_pq as ibeta};
+use std::random::Rng;
+
+/// The binomial distribution: the number of successes in `n >= 0`
+/// independent trials of probability `p`. The PMF and CDF go through
+/// the incomplete beta function's factor and continued fraction, so
+/// both tails keep their relative accuracy for large `n`.
+///
+/// ```nabi
+/// use stats::{Binomial, Discrete};
+///
+/// let d = try Binomial::new(20, 0.3);
+/// assert((d.cdf(4) - 0.2375077788776017).abs() < 1e-15);
+/// assert(d.mean() == 6.0);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Binomial {
+    pub(pkg) n: i64;
+    pub(pkg) p: f64;
+}
+
+impl Binomial {
+    /// Binomial(n, p), `n >= 0`, `0 <= p <= 1`.
+    pub fn new(n: i64, p: f64) throws (StatsError) -> Binomial {
+        try check(n >= 0 && p >= 0.0 && p <= 1.0, f"Binomial: n = {n}, p = {p}; need n >= 0 and p in [0, 1]");
+        Binomial { n: n, p: p }
+    }
+
+    /// The number of trials.
+    pub fn trials(self) -> i64 { self.n }
+
+    /// The success probability.
+    pub fn p(self) -> f64 { self.p }
+
+    /// The maximum-likelihood `p` for counts out of `n` trials each:
+    /// `sum(x) / (n * len(x))`.
+    ///
+    /// ```nabi
+    /// assert((try stats::Binomial::fit([3, 5, 4], 10)).p() == 0.4);
+    /// ```
+    pub fn fit<X: Sample>(x: X, n: i64) throws (StatsError) -> Binomial {
+        let v = x.values();
+        try need("Binomial::fit", 1, v.n);
+        try arg(n > 0, f"Binomial::fit: n = {n}; pass the number of trials per count (> 0)");
+        for i in 0..v.n {
+            let k = v.at(i);
+            try arg(k >= 0.0 && k <= n as f64 && k == k.floor(), f"Binomial::fit: count {i} is {k}; counts must be whole numbers in [0, {n}]");
+        }
+        try Binomial::new(n, kernel::sum(v.d, 0, v.n) / (n as f64 * v.n as f64))
+    }
+}
+
+impl Distribution for Binomial {
+    type Value = i64;
+    fn sample<G: Rng>(self, ref g: G) -> i64 { draw::binomial(ref g, self.n, self.p) }
+}
+
+impl Discrete for Binomial {
+    fn pmf(self, k: i64) -> f64 {
+        if k < 0 || k > self.n { return 0.0; }
+        let (n, p) = (self.n, self.p);
+        if p == 0.0 { return if k == 0 { 1.0 } else { 0.0 }; }
+        if p == 1.0 { return if k == n { 1.0 } else { 0.0 }; }
+        if k == 0 { return (n as f64 * (-p).ln_1p()).exp(); }
+        if k == n { return (n as f64 * p.ln()).exp(); }
+        // C(n, k) p^k q^(n - k) = p^k q^(n - k) / (B(k, n - k + 1) k).
+        beta_prefix(k as f64, (n - k + 1) as f64, p, 1.0 - p) / ((1.0 - p) * k as f64)
+    }
+    fn cdf(self, k: i64) -> f64 {
+        if k < 0 { return 0.0; }
+        if k >= self.n { return 1.0; }
+        // P(X <= k) = I_(1 - p)(n - k, k + 1).
+        ibeta((self.n - k) as f64, (k + 1) as f64, 1.0 - self.p, self.p).0
+    }
+    fn sf(self, k: i64) -> f64 {
+        if k < 0 { return 1.0; }
+        if k >= self.n { return 0.0; }
+        ibeta((self.n - k) as f64, (k + 1) as f64, 1.0 - self.p, self.p).1
+    }
+    fn ppf(self, q: f64) -> i64 {
+        let s = self.var().sqrt();
+        search(self, q, self.mean() + s * ndtri(q.clamp(1e-300, 1.0 - 1e-16)), 0, self.n)
+    }
+    fn mean(self) -> f64 { self.n as f64 * self.p }
+    fn var(self) -> f64 { self.n as f64 * self.p * (1.0 - self.p) }
+}

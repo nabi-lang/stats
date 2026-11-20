@@ -1,0 +1,80 @@
+// The continuous uniform distribution on [a, b].
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::dist::{Continuous, Distribution, check, draw};
+use pkg::error::need;
+use pkg::kernel;
+use std::random::Rng;
+
+/// The uniform distribution on `[a, b]`, `a < b`.
+///
+/// ```nabi
+/// use stats::{Continuous, Uniform};
+///
+/// let d = try Uniform::new(2.0, 6.0);
+/// assert(d.cdf(3.0) == 0.25 && d.ppf(0.75) == 5.0 && d.var() == 16.0 / 12.0);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Uniform {
+    pub(pkg) a: f64;
+    pub(pkg) b: f64;
+}
+
+impl Uniform {
+    /// The uniform distribution on `[a, b]`; both finite, `a < b`.
+    pub fn new(a: f64, b: f64) throws (StatsError) -> Uniform {
+        try check(a.is_finite() && b.is_finite() && a < b, f"Uniform: a = {a}, b = {b}; need finite a < b");
+        Uniform { a: a, b: b }
+    }
+
+    /// The lower end.
+    pub fn a(self) -> f64 { self.a }
+
+    /// The upper end.
+    pub fn b(self) -> f64 { self.b }
+
+    /// The maximum-likelihood fit `[min(x), max(x)]`.
+    ///
+    /// ```nabi
+    /// let d = try stats::Uniform::fit([0.5, 0.2, 0.9]);
+    /// assert(d.a() == 0.2 && d.b() == 0.9);
+    /// ```
+    pub fn fit<X: Sample>(x: X) throws (StatsError) -> Uniform {
+        let v = x.values();
+        try need("Uniform::fit", 2, v.n);
+        let (lo, hi) = kernel::minmax(v.d, 0, v.n);
+        try Uniform::new(lo, hi)
+    }
+}
+
+impl Distribution for Uniform {
+    type Value = f64;
+    fn sample<G: Rng>(self, ref g: G) -> f64 { self.a + (self.b - self.a) * draw::uniform(ref g) }
+}
+
+impl Continuous for Uniform {
+    fn pdf(self, x: f64) -> f64 { if x >= self.a && x <= self.b { 1.0 / (self.b - self.a) } else { 0.0 } }
+    fn logpdf(self, x: f64) -> f64 { if x >= self.a && x <= self.b { -(self.b - self.a).ln() } else { f64::NEG_INFINITY } }
+    fn cdf(self, x: f64) -> f64 {
+        if x != x { return x; }
+        ((x - self.a) / (self.b - self.a)).clamp(0.0, 1.0)
+    }
+    fn sf(self, x: f64) -> f64 {
+        if x != x { return x; }
+        ((self.b - x) / (self.b - self.a)).clamp(0.0, 1.0)
+    }
+    fn ppf(self, p: f64) -> f64 {
+        if !(p >= 0.0 && p <= 1.0) { return f64::NAN; }
+        self.a + p * (self.b - self.a)
+    }
+    fn isf(self, q: f64) -> f64 {
+        if !(q >= 0.0 && q <= 1.0) { return f64::NAN; }
+        self.b - q * (self.b - self.a)
+    }
+    fn mean(self) -> f64 { 0.5 * (self.a + self.b) }
+    fn var(self) -> f64 {
+        let w = self.b - self.a;
+        w * w / 12.0
+    }
+}

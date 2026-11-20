@@ -1,0 +1,272 @@
+// Descriptive statistics, quantiles, histograms and correlations
+// against NumPy 2.0 and SciPy 1.13 on fixed data (the constants are
+// their outputs), plus accuracy and edge cases.
+
+use pkg::tests::suite::{EPS, close, expect, rel, throws_kind, uniform};
+use pkg::{Bins, CorrMethod, QuantileMethod, Ties};
+use core::array::{Array, Matrix, Vector};
+
+const X: [f64; 23] = [2.5, 3.1, 4.7, 1.2, 3.1, 8.9, 0.4, 5.5, 3.1, 7.2, 2.2, 6.6, 4.0, 9.8, 1.9, 3.3, 5.0, 2.8, 4.4, 0.9, 6.1, 3.9, 12.5];
+// numpy 2.0.2, scipy
+const STATS: [f64; 14] = [4.482608695652174, 8.457958412098298, 8.842411067193675, 2.9082569370841873, 3.9, 1.0356332726739517, 1.109333066976003, 0.6839693880073718, 1.174132944923553, 3.683969388007372, 25.474420481630634, 263.5403409929209, 0.6200424623325222, 3.15];
+const QS: [f64; 9] = [0.0, 0.04, 0.1, 0.25, 0.5, 0.63, 0.9, 0.97, 1.0];
+const QUANTILES: [[f64; 9]; 13] = [
+    [0.4, 0.4, 1.2, 2.5, 3.9, 4.7, 8.9, 12.5, 12.5],
+    [0.4, 0.4, 1.2, 2.5, 3.9, 4.7, 8.9, 12.5, 12.5],
+    [0.4, 0.4, 0.9, 2.5, 3.9, 4.4, 8.9, 9.8, 12.5],
+    [0.4, 0.4, 0.9900000000000001, 2.425, 3.5999999999999996, 4.547000000000001, 8.389999999999999, 10.636999999999997, 12.5],
+    [0.4, 0.61, 1.1400000000000001, 2.575, 3.9, 4.697, 9.08, 11.986999999999997, 12.5],
+    [0.4, 0.4, 1.02, 2.5, 3.9, 4.736000000000001, 9.44, 12.5, 12.5],
+    [0.4, 0.8400000000000001, 1.34, 2.65, 3.9, 4.658, 8.560000000000002, 10.718, 12.5],
+    [0.4, 0.5333333333333333, 1.1, 2.5500000000000003, 3.9, 4.71, 9.2, 12.409999999999995, 12.5],
+    [0.4, 0.5525000000000001, 1.11, 2.55625, 3.9, 4.70675, 9.170000000000002, 12.304249999999996, 12.5],
+    [0.4, 0.4, 1.2, 2.5, 3.9, 4.4, 7.2, 9.8, 12.5],
+    [0.4, 0.9, 1.9, 2.8, 3.9, 4.7, 8.9, 12.5, 12.5],
+    [0.4, 0.9, 1.2, 2.8, 3.9, 4.7, 8.9, 9.8, 12.5],
+    [0.4, 0.65, 1.5499999999999998, 2.65, 3.9, 4.550000000000001, 8.05, 11.15, 12.5],
+];
+const XE: [f64; 10] = [2.5, 3.1, 4.7, 1.2, 3.1, 8.9, 0.4, 5.5, 3.1, 7.2];
+const QUANTILES_E: [[f64; 9]; 13] = [
+    [0.4, 0.4, 0.4, 2.5, 3.1, 4.7, 7.2, 8.9, 8.9],
+    [0.4, 0.4, 0.8, 2.5, 3.1, 4.7, 8.05, 8.9, 8.9],
+    [0.4, 0.4, 0.4, 1.2, 3.1, 3.1, 7.2, 8.9, 8.9],
+    [0.4, 0.4, 0.4, 1.85, 3.1, 3.58, 7.2, 8.389999999999999, 8.9],
+    [0.4, 0.4, 0.8, 2.5, 3.1, 4.38, 8.05, 8.9, 8.9],
+    [0.4, 0.4, 0.4800000000000001, 2.175, 3.1, 4.588, 8.73, 8.9, 8.9],
+    [0.4, 0.688, 1.1199999999999999, 2.65, 3.1, 4.172, 7.369999999999999, 8.441, 8.9],
+    [0.4, 0.4, 0.6933333333333334, 2.3916666666666666, 3.1, 4.449333333333333, 8.276666666666666, 8.9, 8.9],
+    [0.4, 0.4, 0.72, 2.41875, 3.1, 4.4319999999999995, 8.219999999999999, 8.9, 8.9],
+    [0.4, 0.4, 0.4, 2.5, 3.1, 3.1, 7.2, 7.2, 8.9],
+    [0.4, 1.2, 1.2, 3.1, 3.1, 4.7, 8.9, 8.9, 8.9],
+    [0.4, 0.4, 1.2, 2.5, 3.1, 4.7, 7.2, 8.9, 8.9],
+    [0.4, 0.8, 0.8, 2.8, 3.1, 3.9000000000000004, 8.05, 8.05, 8.9],
+];
+// numpy.histogram_bin_edges(X, rule)
+const EDGES_AUTO: [f64; 7] = [0.4, 2.4166666666666665, 4.433333333333334, 6.45, 8.466666666666667, 10.483333333333333, 12.5];
+const COUNTS_AUTO: [i64; 6] = [5, 9, 4, 2, 2, 1];
+const EDGES_STURGES: [f64; 7] = [0.4, 2.4166666666666665, 4.433333333333334, 6.45, 8.466666666666667, 10.483333333333333, 12.5];
+const COUNTS_STURGES: [i64; 6] = [5, 9, 4, 2, 2, 1];
+const EDGES_SCOTT: [f64; 5] = [0.4, 3.425, 6.45, 9.475, 12.5];
+const COUNTS_SCOTT: [i64; 4] = [11, 7, 3, 2];
+const EDGES_FD: [f64; 7] = [0.4, 2.4166666666666665, 4.433333333333334, 6.45, 8.466666666666667, 10.483333333333333, 12.5];
+const COUNTS_FD: [i64; 6] = [5, 9, 4, 2, 2, 1];
+const EDGES_SQRT: [f64; 6] = [0.4, 2.82, 5.24, 7.66, 10.08, 12.5];
+const COUNTS_SQRT: [i64; 5] = [7, 9, 4, 2, 1];
+const EDGES_RICE: [f64; 7] = [0.4, 2.4166666666666665, 4.433333333333334, 6.45, 8.466666666666667, 10.483333333333333, 12.5];
+const COUNTS_RICE: [i64; 6] = [5, 9, 4, 2, 2, 1];
+const EDGES_DOANE: [f64; 9] = [0.4, 1.9125, 3.425, 4.9375, 6.45, 7.9625, 9.475, 10.9875, 12.5];
+const COUNTS_DOANE: [i64; 8] = [4, 7, 4, 3, 2, 1, 1, 1];
+const Y: [f64; 23] = [1.1, 2.0, 2.9, 0.5, 3.3, 6.8, 1.0, 4.1, 2.2, 5.0, 1.5, 4.9, 3.0, 7.7, 1.7, 2.4, 3.9, 2.0, 3.5, 0.8, 5.2, 2.9, 8.8];
+const CORRS: [f64; 6] = [0.9819433432558093, 1.1403220828214353e-16, 0.9683326271982734, 3.916075343655835e-14, 0.8782452624613791, 5.822798500808461e-09];
+const COV: [[f64; 3]; 3] = [[8.842411067193675, 6.461027667984189, 23.146130642993775], [6.461027667984189, 4.896205533596839, 17.23461778629253], [23.146130642993775, 17.23461778629253, 62.598278337911566]];
+const CORR: [[f64; 3]; 3] = [[1.0, 0.9819433432558095, 0.9838114106244147], [0.9819433432558095, 1.0, 0.9844431510402316], [0.9838114106244148, 0.9844431510402316, 1.0]];
+const SPEARMAN: [[f64; 3]; 3] = [[1.0, 0.9683326271982734, 0.9851636866691553], [0.9683326271982734, 0.9999999999999999, 0.9925853906698587], [0.9851636866691553, 0.9925853906698586, 1.0]];
+const KENDALL02: [f64; 1] = [0.9224816160855512];
+const RANKS: [f64; 23] = [6.0, 9.0, 15.0, 3.0, 9.0, 21.0, 1.0, 17.0, 9.0, 20.0, 5.0, 19.0, 13.0, 22.0, 4.0, 11.0, 16.0, 7.0, 14.0, 2.0, 18.0, 12.0, 23.0];
+
+const METHODS: [QuantileMethod; 13] = [
+    QuantileMethod::InvertedCdf, QuantileMethod::AveragedInvertedCdf, QuantileMethod::ClosestObservation,
+    QuantileMethod::InterpolatedInvertedCdf, QuantileMethod::Hazen, QuantileMethod::Weibull, QuantileMethod::Linear,
+    QuantileMethod::MedianUnbiased, QuantileMethod::NormalUnbiased, QuantileMethod::Lower, QuantileMethod::Higher,
+    QuantileMethod::Nearest, QuantileMethod::Midpoint,
+];
+
+fn x() -> Vector<f64> { Array::from_list(List::from_fn(23, |i| X[i]), [23]) }
+
+#[test]
+fn moments() {
+    let a = x();
+    rel(pkg::mean(a), STATS[0], 2e-16, "mean");
+    rel(pkg::var(a), STATS[1], 4e-16, "var");
+    rel(pkg::var(a, ddof: 1), STATS[2], 4e-16, "var ddof 1");
+    rel(pkg::std(a), STATS[3], 4e-16, "std");
+    rel(pkg::median(a), STATS[4], 0.0, "median");
+    rel(pkg::skew(a), STATS[5], 1e-14, "skew");
+    rel(pkg::skew(a, bias: false), STATS[6], 1e-14, "skew unbiased");
+    rel(pkg::kurtosis(a), STATS[7], 1e-14, "kurtosis");
+    rel(pkg::kurtosis(a, bias: false), STATS[8], 1e-14, "kurtosis unbiased");
+    rel(pkg::kurtosis(a, fisher: false), STATS[9], 1e-14, "kurtosis pearson");
+    rel(pkg::moment(a, 3), STATS[10], 1e-14, "moment 3");
+    rel(pkg::moment(a, 4), STATS[11], 1e-14, "moment 4");
+    rel(pkg::sem(a), STATS[12], 4e-16, "sem");
+    rel(pkg::iqr(a), STATS[13], 4e-16, "iqr");
+    let (m, c) = pkg::mode(a);
+    expect(m == 3.1 && c == 3, "mode");
+    rel(try! pkg::wmean([1.0, 2.0, 4.0], [1.0, 1.0, 2.0]), 2.75, 0.0, "wmean");
+    // The same values in other containers.
+    let l: List<f64> = a.to_list();
+    expect(pkg::mean(l) == pkg::mean(a) && pkg::var(l) == pkg::var(a), "List");
+    let m2: Matrix<f64> = a[:22].reshape([2, 11]);
+    expect(pkg::sum(m2) == pkg::sum(a[:22]), "matrix");
+    let t = a.t();
+    expect(pkg::median(a[::-1]) == pkg::median(a) && pkg::mean(t) == pkg::mean(a), "views");
+    let f: List<f32> = [1.5f32, 2.5f32, 3.0f32];
+    rel(pkg::mean(f), 7.0 / 3.0, 4e-16, "f32");
+    let ints: List<i64> = [1, 2, 3, 4];
+    expect(pkg::var(ints) == 1.25, "i64");
+}
+
+#[test]
+fn quantile_methods() {
+    let a = x();
+    let e: Vector<f64> = Array::from_list(List::from_fn(10, |i| XE[i]), [10]);
+    for m in 0..13 {
+        for j in 0..9 {
+            rel(try! pkg::quantile(a, QS[j], METHODS[m]), QUANTILES[m][j], 1e-15, f"{METHODS[m]:?} q = {QS[j]} (n = 23)");
+            rel(try! pkg::quantile(e, QS[j], METHODS[m]), QUANTILES_E[m][j], 1e-15, f"{METHODS[m]:?} q = {QS[j]} (n = 10)");
+        }
+        let q = try! pkg::quantiles(a, QS, METHODS[m]);
+        for j in 0..9 { rel(q[j], QUANTILES[m][j], 1e-15, f"quantiles {METHODS[m]:?}"); }
+    }
+    rel(try! pkg::percentile(a, 63.0), QUANTILES[6][5], 4e-16, "percentile");
+    expect(throws_kind(|| { _ = try pkg::quantile(a, 1.5); }, "InvalidArgument"), "q > 1");
+    expect(throws_kind(|| { _ = try pkg::percentile(a, -1.0); }, "InvalidArgument"), "p < 0");
+}
+
+#[test]
+fn edge_cases() {
+    let empty: List<f64> = [];
+    expect(pkg::mean(empty) != pkg::mean(empty) && pkg::median(empty) != pkg::median(empty), "empty is NaN");
+    expect(pkg::sum(empty) == 0.0, "empty sum");
+    expect(pkg::var([1.0], ddof: 1) != pkg::var([1.0], ddof: 1), "n <= ddof");
+    expect(pkg::var([3.0, 3.0, 3.0]) == 0.0 && pkg::skew([3.0, 3.0, 3.0]) == 0.0, "constant");
+    let nn = [1.0, f64::NAN, 2.0];
+    expect(pkg::mean(nn) != pkg::mean(nn) && pkg::max(nn) != pkg::max(nn) && pkg::median(nn) != pkg::median(nn), "NaN propagates");
+    expect(pkg::nan::mean(nn) == 1.5 && pkg::nan::max(nn) == 2.0 && pkg::nan::count(nn) == 2, "nan::");
+    expect(pkg::nan::median([f64::NAN, 5.0]) == 5.0 && try! pkg::nan::quantile(nn, 1.0) == 2.0, "nan:: order");
+    expect(pkg::max([1.0, f64::INFINITY]) == f64::INFINITY, "inf");
+    expect(throws_kind(|| { _ = try pkg::wmean([1.0, 2.0], [1.0]); }, "ShapeMismatch"), "wmean lengths");
+    expect(throws_kind(|| { _ = try pkg::wmean([1.0, 2.0], [1.0, -1.0]); }, "InvalidArgument"), "negative weight");
+}
+
+#[test]
+fn summation_accuracy() {
+    // 1e6 copies of 0.1: pairwise summation keeps the error near eps
+    // log2(n) relative; a plain loop drifts to about 1e-11.
+    let n = 1000000usize;
+    let a: Vector<f64> = Array::full([n], 0.1);
+    rel(pkg::sum(a), 100000.00000000001, 4e-15, "sum of 0.1");
+    rel(pkg::mean(a), 0.1, 2e-16, "mean of 0.1");
+    // Large offset: the two-pass variance is exact here, a one-pass
+    // E[x^2] - E[x]^2 would lose every digit.
+    let b = uniform(100001, 0.0, 1.0, 5) .+ 1e9;
+    let c = uniform(100001, 0.0, 1.0, 5);
+    rel(pkg::var(b), pkg::var(c), 1e-6, "variance with offset 1e9");
+    // Above the parallel threshold the result is the same deterministic sum.
+    let big = uniform(3000000, -1.0, 1.0, 7);
+    let l: List<f64> = big.to_list();
+    expect(pkg::sum(big) == pkg::sum(l), "parallel sum is deterministic");
+    close(pkg::mean(big), 0.0, 1e-3, "mean of uniforms");
+}
+
+#[test]
+fn zscore_and_describe() {
+    let a = x();
+    let z = pkg::zscore(a);
+    close(pkg::mean(z), 0.0, 1e-15, "zscore mean");
+    close(pkg::std(z), 1.0, 4e-16, "zscore std");
+    let m: Matrix<f64> = [[1, 2], [3, 4]];
+    expect(pkg::zscore(m).shape() == [2, 2], "zscore shape");
+    let s = pkg::describe(a);
+    expect(s.n == 23 && s.min == 0.4 && s.max == 12.5 && s.median == STATS[4], "describe");
+    rel(s.q1, QUANTILES[6][3], 0.0, "describe q1");
+    expect(f"{s}".contains("median"), "describe display");
+}
+
+#[test]
+fn along_axes() {
+    let m: Matrix<f64> = [[1, 2, 9], [4, 6, 8]];
+    expect((try! pkg::axis::mean(m, 0)).to_list() == [2.5, 4.0, 8.5], "mean axis 0");
+    expect((try! pkg::axis::median(m, 1)).to_list() == [2.0, 6.0], "median axis 1");
+    expect((try! pkg::axis::max(m, 1)).to_list() == [9.0, 8.0] && (try! pkg::axis::min(m, 0)).to_list() == [1.0, 2.0, 8.0], "extremes");
+    expect((try! pkg::axis::var(m, 0, 1)).to_list() == [4.5, 8.0, 0.5], "var ddof 1");
+    let c: Array<f64, 3> = Array::from_fn([2, 3, 4], |i: [usize; 3]| -> f64 { (i[0] * 100 + i[1] * 10 + i[2]) as f64 });
+    let r = try! pkg::axis::sum(c, 1);
+    expect(r.shape() == [2, 4] && r[1, 3] == 3.0 * 103.0 + 30.0, "rank 3 sum");
+    let q = try! pkg::axis::quantile(c, 2, 0.5);
+    expect(q[0, 0] == 1.5, "rank 3 quantile");
+    let v: Vector<f64> = [3, 1, 2];
+    expect((try! pkg::axis::mean(v, 0)).to_list() == [2.0], "rank 1 to rank 0");
+    expect(throws_kind(|| { _ = try pkg::axis::mean(m, 2); }, "InvalidArgument"), "axis past rank");
+    let s = try! pkg::axis::apply(m, 1, |x: Vector<f64>| -> f64 { pkg::range(x) });
+    expect(s.to_list() == [8.0, 4.0], "apply");
+}
+
+#[test]
+fn histograms() {
+    let a = x();
+    let rules = [Bins::Auto, Bins::Sturges, Bins::Scott, Bins::Fd, Bins::Sqrt, Bins::Rice, Bins::Doane];
+    let edges: List<List<f64>> = [EDGES_AUTO.to_list(), EDGES_STURGES.to_list(), EDGES_SCOTT.to_list(), EDGES_FD.to_list(), EDGES_SQRT.to_list(), EDGES_RICE.to_list(), EDGES_DOANE.to_list()];
+    let counts: List<List<i64>> = [COUNTS_AUTO.to_list(), COUNTS_STURGES.to_list(), COUNTS_SCOTT.to_list(), COUNTS_FD.to_list(), COUNTS_SQRT.to_list(), COUNTS_RICE.to_list(), COUNTS_DOANE.to_list()];
+    for k in 0..7 {
+        let e = try! pkg::bin_edges(a, rules[k]);
+        expect(e.len() == edges[k].len(), f"{rules[k]:?}: {e.len()} edges, NumPy {edges[k].len()}");
+        for i in 0..e.len() { close(e[i], edges[k][i], 4.0 * EPS * 12.5, f"{rules[k]:?} edge {i}"); }
+        let h = try! pkg::histogram(a, rules[k]);
+        expect(h.counts.to_list() == counts[k], f"{rules[k]:?} counts {h.counts:?}");
+    }
+    let h = try! pkg::histogram(a, Bins::Count(4));
+    let total = 0i64;
+    for c in h.counts { total += c; }
+    expect(total == 23, "every value counted");
+    let d = h.density();
+    let area = 0.0;
+    for i in 0..4 { area += d[i] * (h.edges[i + 1] - h.edges[i]); }
+    close(area, 1.0, 1e-15, "density integrates to 1");
+    let e: Vector<f64> = [0, 5, 20];
+    let he = try! pkg::histogram(a, Bins::Edges(e));
+    expect(he.counts.to_list() == [15, 8], "explicit edges");
+    expect(throws_kind(|| { _ = try pkg::bin_edges(a, Bins::Count(0)); }, "InvalidArgument"), "zero bins");
+    let bad: Vector<f64> = [1, 1];
+    expect(throws_kind(|| { _ = try pkg::bin_edges(a, Bins::Edges(bad)); }, "InvalidArgument"), "edges must rise");
+    let one = try! pkg::bin_edges([2.0, 2.0], Bins::Count(2));
+    expect(one.to_list() == [1.5, 2.0, 2.5], "constant data");
+}
+
+#[test]
+fn correlations() {
+    let a = x();
+    let y: Vector<f64> = Array::from_list(List::from_fn(23, |i| Y[i]), [23]);
+    rel(try! pkg::pearson(a, y), CORRS[0], 4e-16, "pearson");
+    rel(try! pkg::spearman(a, y), CORRS[2], 4e-16, "spearman");
+    rel(try! pkg::kendall(a, y), CORRS[4], 4e-16, "kendall");
+    let r = pkg::rankdata(a);
+    for i in 0..23 { expect(r[i] == RANKS[i], f"rank {i}"); }
+    let o = pkg::rankdata(a, Ties::Ordinal);
+    expect(o[1] == 8.0 && o[4] == 9.0 && o[8] == 10.0, "ordinal ties in order");
+    let m: Matrix<f64> = Array::from_fn([23, 3], |ix: [usize; 2]| -> f64 {
+        let (u, v) = (X[ix[0]], Y[ix[0]]);
+        if ix[1] == 0 { u } else if ix[1] == 1 { v } else { u.sqrt() * v }
+    });
+    let c = try! pkg::cov(m);
+    let p = try! pkg::corr(m);
+    let s = try! pkg::corr(m, CorrMethod::Spearman);
+    let k = try! pkg::corr(m, CorrMethod::Kendall);
+    for i in 0..3 {
+        for j in 0..3 {
+            rel(c[i, j], COV[i][j], 1e-15, f"cov[{i}, {j}]");
+            rel(p[i, j], CORR[i][j], 1e-15, f"corr[{i}, {j}]");
+            rel(s[i, j], SPEARMAN[i][j], 1e-15, f"spearman[{i}, {j}]");
+            expect(c[i, j] == c[j, i], "cov symmetric");
+        }
+    }
+    rel(k[0, 2], KENDALL02[0], 4e-16, "kendall matrix");
+    expect(throws_kind(|| { _ = try pkg::pearson([1.0, 2.0], [1.0]); }, "ShapeMismatch"), "lengths");
+    expect(throws_kind(|| { _ = try pkg::cov(m[:1, :]); }, "TooFew"), "one row");
+    let flat = try! pkg::pearson([1.0, 1.0, 1.0], [1.0, 2.0, 3.0]);
+    expect(flat != flat, "constant is NaN");
+}
+
+#[test]
+fn every_input_form() {
+    // The forms of `linalg::AsVector<f64>` give the same answer.
+    let want = 2.5;
+    let l32: List<i32> = [1, 2, 3, 4];
+    let lu: List<usize> = [1, 2, 3, 4];
+    let a32: Vector<i32> = Array::from_list(l32, [4]);
+    let fixed: [i64; 4] = [1, 2, 3, 4];
+    let ff: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+    expect(pkg::mean(l32) == want && pkg::mean(lu) == want && pkg::mean(a32) == want, "integer lists and arrays");
+    expect(pkg::mean(fixed) == want && pkg::mean(ff) == want && pkg::mean(1..5) == want, "fixed arrays and a range");
+    expect(pkg::median(1..5) == want, "median of a range");
+}

@@ -1,0 +1,97 @@
+// The gamma distribution with shape k and scale theta.
+
+use pkg::data::Sample;
+use pkg::dist::{Continuous, Distribution, check, draw};
+use pkg::error::{arg, need};
+use pkg::kernel;
+use pkg::{StatsError, Values};
+use specfun::{digamma, gammainc_factor as gamma_prefix, gammainc_pq as gamma_pq, gammainccinv, gammaincinv, lgamma, trigamma};
+use std::random::Rng;
+
+/// The gamma distribution with shape `k > 0` and scale `theta > 0`
+/// (mean `k theta`). The CDF is the regularized incomplete gamma
+/// function; draws by Marsaglia and Tsang (2000).
+///
+/// ```nabi
+/// use stats::{Continuous, Gamma};
+///
+/// let d = try Gamma::new(2.0, 3.0);
+/// assert(d.mean() == 6.0 && d.var() == 18.0);
+/// assert((d.cdf(6.0) - 0.5939941502901619).abs() < 1e-15);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Gamma {
+    pub(pkg) k: f64;
+    pub(pkg) theta: f64;
+}
+
+impl Gamma {
+    /// Gamma(k, theta); both finite and positive.
+    pub fn new(k: f64, theta: f64) throws (StatsError) -> Gamma {
+        try check(k > 0.0 && k.is_finite() && theta > 0.0 && theta.is_finite(), f"Gamma: k = {k}, theta = {theta}; the shape and the scale must be finite and > 0");
+        Gamma { k: k, theta: theta }
+    }
+
+    /// The shape.
+    pub fn shape(self) -> f64 { self.k }
+
+    /// The scale.
+    pub fn scale(self) -> f64 { self.theta }
+
+    /// The maximum-likelihood fit. The shape solves `ln k - psi(k) =
+    /// ln mean(x) - mean(ln x)` by Newton's method from Minka's (2002)
+    /// start; then `theta = mean / k`. Values must be positive and not
+    /// all equal.
+    ///
+    /// ```nabi
+    /// let d = try stats::Gamma::fit([1.0, 2.0, 3.0, 4.0, 5.0]);
+    /// assert((d.shape() - 3.701643810008814).abs() < 1e-10); // SciPy: gamma.fit(x, floc=0)
+    /// ```
+    pub fn fit<X: Sample>(x: X) throws (StatsError) -> Gamma {
+        let v = x.values();
+        try need("Gamma::fit", 2, v.n);
+        let l = Values::new(v.n);
+        for i in 0..v.n {
+            let t = v.at(i);
+            try arg(t > 0.0 && t.is_finite(), f"Gamma::fit: value {i} is {t}; every value must be finite and > 0");
+            unsafe { l.d.set(i, t.ln()); }
+        }
+        let m = pkg::descriptive::mean_of(v);
+        let s = m.ln() - kernel::sum(l.d, 0, l.n) / v.n as f64;
+        try arg(s > 0.0, "Gamma::fit: the values are all equal; a gamma fit needs spread");
+        let k = (3.0 - s + ((s - 3.0) * (s - 3.0) + 24.0 * s).sqrt()) / (12.0 * s);
+        for _ in 0..100 {
+            let f = k.ln() - digamma(k) - s;
+            let d = 1.0 / k - trigamma(k);
+            let nk = k - f / d;
+            if !(nk > 0.0) { nk = 0.5 * k; }
+            let done = (nk - k).abs() <= 1e-15 * nk;
+            k = nk;
+            if done { break; }
+        }
+        try Gamma::new(k, m / k)
+    }
+}
+
+impl Distribution for Gamma {
+    type Value = f64;
+    fn sample<G: Rng>(self, ref g: G) -> f64 { draw::gamma(ref g, self.k) * self.theta }
+}
+
+impl Continuous for Gamma {
+    fn pdf(self, x: f64) -> f64 {
+        if x < 0.0 { return 0.0; }
+        if x == 0.0 { return if self.k < 1.0 { f64::INFINITY } else if self.k == 1.0 { 1.0 / self.theta } else { 0.0 }; }
+        gamma_prefix(self.k, x / self.theta) / x
+    }
+    fn logpdf(self, x: f64) -> f64 {
+        if x < 0.0 { return f64::NEG_INFINITY; }
+        (self.k - 1.0) * x.ln() - x / self.theta - lgamma(self.k) - self.k * self.theta.ln()
+    }
+    fn cdf(self, x: f64) -> f64 { if x <= 0.0 { 0.0 } else { gamma_pq(self.k, x / self.theta).0 } }
+    fn sf(self, x: f64) -> f64 { if x <= 0.0 { 1.0 } else { gamma_pq(self.k, x / self.theta).1 } }
+    fn ppf(self, p: f64) -> f64 { self.theta * gammaincinv(self.k, p) }
+    fn isf(self, q: f64) -> f64 { self.theta * gammainccinv(self.k, q) }
+    fn mean(self) -> f64 { self.k * self.theta }
+    fn var(self) -> f64 { self.k * self.theta * self.theta }
+}

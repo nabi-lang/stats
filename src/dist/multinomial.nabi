@@ -1,0 +1,152 @@
+// The multinomial distribution: counts of n draws over k categories.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::dist::{Distribution, check, draw};
+use pkg::error::{arg, need, same};
+use pkg::kernel;
+use core::array::{Array, Matrix, Vector};
+use specfun::lgamma;
+use std::random::Rng;
+
+/// The multinomial distribution: the counts in each of `k` categories
+/// after `n` independent draws with probabilities `p`. A draw is a
+/// vector of `k` counts summing to `n` (conditional binomials).
+///
+/// ```nabi
+/// use stats::Multinomial;
+///
+/// let d = try Multinomial::new(4, [0.5, 0.25, 0.25]);
+/// assert((try d.pmf([2, 1, 1]) - 0.1875).abs() < 1e-16);
+/// assert(d.mean()[0] == 2.0);
+/// ```
+#[derive(Clone, PartialEq, Debug)]
+pub struct Multinomial {
+    pub(pkg) n: i64;
+    pub(pkg) p: List<f64>;
+}
+
+impl Multinomial {
+    /// Multinomial(n, p): `n >= 0`, `p` non-negative and summing to 1
+    /// within 1e-9 (then rescaled to sum to 1 exactly up to rounding).
+    pub fn new<P: Sample>(n: i64, p: P) throws (StatsError) -> Multinomial {
+        let v = p.values();
+        try check(n >= 0, f"Multinomial: n = {n}; the number of draws must be >= 0");
+        try check(v.n >= 1, "Multinomial: no categories; pass one probability per category");
+        for i in 0..v.n { try check(v.at(i) >= 0.0 && v.at(i).is_finite(), f"Multinomial: p[{i}] = {v.at(i)}; probabilities must be finite and >= 0"); }
+        let s = kernel::sum(v.d, 0, v.n);
+        try check((s - 1.0).abs() <= 1e-9, f"Multinomial: the probabilities sum to {s}; they must sum to 1");
+        let q: List<f64> = List::from_fn(v.n, |i| v.at(i) / s);
+        Multinomial { n: n, p: q }
+    }
+
+    /// The number of draws.
+    pub fn trials(self) -> i64 { self.n }
+
+    /// The category probabilities.
+    pub fn p(self) -> Vector<f64> { Array::from_list(self.p.clone(), [self.p.len()]) }
+
+    /// The number of categories.
+    pub fn categories(self) -> usize { self.p.len() }
+
+    /// `ln P(X = x)` for a vector of counts `x`; `-inf` when the counts
+    /// do not sum to `n`, are negative or not whole. Throws
+    /// `ShapeMismatch` when `x` has the wrong length.
+    ///
+    /// ```nabi
+    /// let d = try stats::Multinomial::new(2, [0.5, 0.5]);
+    /// assert((try d.logpmf([1, 1]) - 0.5.ln()).abs() < 1e-15);
+    /// ```
+    pub fn logpmf<X: Sample>(self, x: X) throws (StatsError) -> f64 {
+        let v = x.values();
+        try same("Multinomial::logpmf: counts and categories", v.n, self.p.len());
+        let total = 0.0;
+        let l = lgamma(self.n as f64 + 1.0);
+        for i in 0..v.n {
+            let k = v.at(i);
+            if !(k >= 0.0 && k == k.floor()) { return f64::NEG_INFINITY; }
+            total += k;
+            let pi = self.p[i];
+            if k > 0.0 {
+                if pi == 0.0 { return f64::NEG_INFINITY; }
+                l += k * pi.ln();
+            }
+            l -= lgamma(k + 1.0);
+        }
+        if total != self.n as f64 { return f64::NEG_INFINITY; }
+        l
+    }
+
+    /// `P(X = x)`; 0 where `logpmf` is `-inf`. Throws `ShapeMismatch`
+    /// when `x` has the wrong length.
+    pub fn pmf<X: Sample>(self, x: X) throws (StatsError) -> f64 { (try self.logpmf(x)).exp() }
+
+    /// `n p`.
+    pub fn mean(self) -> Vector<f64> { self.p() .* (self.n as f64) }
+
+    /// The covariance `n (diag(p) - p p^T)`.
+    ///
+    /// ```nabi
+    /// let d = try stats::Multinomial::new(10, [0.5, 0.5]);
+    /// assert(d.cov()[0, 0] == 2.5 && d.cov()[0, 1] == -2.5);
+    /// ```
+    pub fn cov(self) -> Matrix<f64> {
+        let k = self.p.len();
+        let p = self.p;
+        let n = self.n as f64;
+        Array::from_fn([k, k], |ix: [usize; 2]| -> f64 {
+            let (a, b) = (p[ix[0]], p[ix[1]]);
+            if ix[0] == ix[1] { n * a * (1.0 - a) } else { -n * a * b }
+        })
+    }
+
+    /// The maximum-likelihood fit from rows of counts (one observation
+    /// per row, each summing to the same `n`): `p` is the column sums
+    /// over the grand total.
+    ///
+    /// ```nabi
+    /// use core::array::Matrix;
+    ///
+    /// let x: Matrix<f64> = [[1, 2, 1], [3, 0, 1]];
+    /// let d = try stats::Multinomial::fit(x);
+    /// assert(d.trials() == 4 && d.p()[0] == 0.5);
+    /// ```
+    pub fn fit(x: Matrix<f64>) throws (StatsError) -> Multinomial {
+        let s = x.shape();
+        try need("Multinomial::fit", 1, s[0]);
+        let n = -1.0;
+        let col: List<f64> = List::from_fn(s[1], |_| 0.0);
+        for i in 0..s[0] {
+            let r = 0.0;
+            for j in 0..s[1] {
+                let k = x[i, j];
+                try arg(k >= 0.0 && k == k.floor() && k.is_finite(), f"Multinomial::fit: x[{i}, {j}] = {k}; counts must be whole numbers >= 0");
+                r += k;
+                col[j] += k;
+            }
+            if n < 0.0 { n = r; }
+            try arg(r == n, f"Multinomial::fit: row {i} sums to {r}, row 0 to {n}; every row must have the same number of draws");
+        }
+        try arg(n > 0.0, "Multinomial::fit: the rows sum to 0; give at least one draw per row");
+        let p: List<f64> = List::from_fn(s[1], |j| col[j] / (n * s[0] as f64));
+        try Multinomial::new(n as i64, p)
+    }
+}
+
+impl Distribution for Multinomial {
+    type Value = Array<i64, 1>;
+    fn sample<G: Rng>(self, ref g: G) -> Array<i64, 1> {
+        let k = self.p.len();
+        let out: List<i64> = List::with_capacity(k);
+        let left = self.n;
+        let mass = 1.0;
+        for i in 0..k {
+            let pi = self.p[i];
+            let c = if i + 1 == k || mass <= 0.0 { left } else { draw::binomial(ref g, left, (pi / mass).min(1.0)) };
+            out.push(c);
+            left -= c;
+            mass -= pi;
+        }
+        Array::view_list(out, [k])
+    }
+}

@@ -1,0 +1,93 @@
+// The normal distribution N(mu, sigma^2).
+
+use pkg::StatsError;
+use pkg::data::{Sample, vector};
+use pkg::descriptive::{mean_of, var_of};
+use pkg::dist::{Continuous, Distribution, check, draw};
+use pkg::error::need;
+use pkg::kernel::buf;
+use core::array::Array;
+use specfun::{ndtr, ndtri_pq as qnorm};
+use std::random::Rng;
+
+const LN_SQRT_2PI: f64 = 0.9189385332046728;
+
+/// The normal (Gaussian) distribution with mean `mu` and standard
+/// deviation `sigma > 0`. CDF and quantile through `ndtr` / `ndtri`,
+/// so both tails keep full relative accuracy; draws by the ziggurat.
+///
+/// ```nabi
+/// use stats::{Continuous, Normal};
+///
+/// let d = try Normal::new(100.0, 15.0);
+/// assert((d.cdf(130.0) - 0.9772498680518208).abs() < 1e-15);
+/// assert((d.ppf(0.5) - 100.0).abs() < 1e-12);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Normal {
+    pub(pkg) mu: f64;
+    pub(pkg) sigma: f64;
+}
+
+impl Normal {
+    /// N(mu, sigma^2); throws `InvalidParameter` unless `mu` is finite
+    /// and `sigma` finite and positive.
+    pub fn new(mu: f64, sigma: f64) throws (StatsError) -> Normal {
+        try check(mu.is_finite() && sigma > 0.0 && sigma.is_finite(), f"Normal: mu = {mu}, sigma = {sigma}; mu must be finite and sigma finite and > 0");
+        Normal { mu: mu, sigma: sigma }
+    }
+
+    /// N(0, 1).
+    pub fn standard() -> Normal { Normal { mu: 0.0, sigma: 1.0 } }
+
+    /// The mean parameter.
+    pub fn mu(self) -> f64 { self.mu }
+
+    /// The standard deviation parameter.
+    pub fn sigma(self) -> f64 { self.sigma }
+
+    /// The maximum-likelihood fit: the mean and the population standard
+    /// deviation (`ddof = 0`). Throws `TooFew` below 2 values,
+    /// `NotFinite` for NaN or infinity, `InvalidParameter` for constant
+    /// data.
+    ///
+    /// ```nabi
+    /// let d = try stats::Normal::fit([1.0, 2.0, 3.0, 4.0]);
+    /// assert(d.mu() == 2.5 && (d.sigma() - 1.25.sqrt()).abs() < 1e-15);
+    /// ```
+    pub fn fit<X: Sample>(x: X) throws (StatsError) -> Normal {
+        let v = x.values();
+        try need("Normal::fit", 2, v.n);
+        try pkg::error::finite("Normal::fit", v);
+        try Normal::new(mean_of(v), var_of(v, 0).sqrt())
+    }
+}
+
+impl Distribution for Normal {
+    type Value = f64;
+    fn sample<G: Rng>(self, ref g: G) -> f64 { self.mu + self.sigma * draw::normal(ref g) }
+
+    fn samples<G: Rng>(self, ref g: G, n: usize) -> Array<f64, 1> {
+        let d = buf::<f64>(n);
+        unsafe {
+            for i in 0..n { d.set(i, self.mu + self.sigma * draw::normal(ref g)); }
+        }
+        vector(d, 0, n)
+    }
+}
+
+impl Continuous for Normal {
+    fn pdf(self, x: f64) -> f64 { self.logpdf(x).exp() }
+    fn logpdf(self, x: f64) -> f64 {
+        let z = (x - self.mu) / self.sigma;
+        -0.5 * z * z - self.sigma.ln() - LN_SQRT_2PI
+    }
+    fn cdf(self, x: f64) -> f64 { ndtr((x - self.mu) / self.sigma) }
+    fn sf(self, x: f64) -> f64 { ndtr((self.mu - x) / self.sigma) }
+    fn ppf(self, p: f64) -> f64 { self.mu + self.sigma * qnorm(p, 1.0 - p) }
+    fn isf(self, q: f64) -> f64 { self.mu - self.sigma * qnorm(q, 1.0 - q) }
+    fn mean(self) -> f64 { self.mu }
+    fn var(self) -> f64 { self.sigma * self.sigma }
+    fn std(self) -> f64 { self.sigma }
+    fn median(self) -> f64 { self.mu }
+}

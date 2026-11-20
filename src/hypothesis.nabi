@@ -1,0 +1,109 @@
+//! Hypothesis tests. Each returns its statistic and p-value (and the
+//! degrees of freedom where the reference distribution has them) and
+//! throws `TooFew`, `NotFinite` or `InvalidArgument` for input it cannot
+//! test. The definitions, defaults and p-value methods follow SciPy's
+//! `scipy.stats` functions of the same names, which the tests compare
+//! against.
+
+mod anova;
+mod assoc;
+mod chisq;
+mod exact;
+mod ks;
+mod normality;
+mod ranksum;
+mod ttest;
+
+pub use anova::{Anova, f_oneway};
+pub use assoc::{kendalltau, pearsonr, spearmanr};
+pub use chisq::{Contingency, chi2_contingency, chisquare};
+pub use exact::fisher_exact;
+pub use ks::{ks_2samp, kstest};
+pub use normality::shapiro;
+pub use ranksum::{mannwhitneyu, wilcoxon};
+pub use ttest::{TTest, ttest_1samp, ttest_ind, ttest_rel};
+
+use pkg::dist::{Continuous, StudentT};
+use specfun::ndtr;
+
+/// Which way the alternative hypothesis points.
+///
+/// ```nabi
+/// use stats::Alternative;
+///
+/// let x = [5.1, 4.9, 5.6, 5.8, 6.0, 5.4];
+/// let two = try stats::ttest_1samp(x, 5.0);
+/// let up = try stats::ttest_1samp(x, 5.0, Alternative::Greater);
+/// assert((up.pvalue - two.pvalue / 2.0).abs() < 1e-15);
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Alternative {
+    /// The parameter differs from the null value, either way.
+    TwoSided,
+    /// It is below the null value.
+    Less,
+    /// It is above the null value.
+    Greater,
+}
+
+/// The outcome of a test: the statistic, its p-value and, for tests
+/// with a t, chi-squared or similar reference distribution, the degrees
+/// of freedom.
+///
+/// ```nabi
+/// let r = try stats::chisquare([16.0, 18.0, 16.0, 14.0, 12.0, 12.0]);
+/// assert(r.statistic == 2.0 && r.df == 5.0);
+/// assert((r.pvalue - 0.8491450360846096).abs() < 1e-15);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TestResult {
+    /// The test statistic.
+    pub statistic: f64;
+    /// The probability, under the null hypothesis, of a statistic at
+    /// least as extreme as the one observed.
+    pub pvalue: f64;
+    /// The degrees of freedom of the reference distribution, or `none`.
+    pub df: f64 | none;
+}
+
+impl TestResult {
+    /// Whether the test rejects the null hypothesis at level `alpha`
+    /// (`pvalue < alpha`).
+    ///
+    /// ```nabi
+    /// let r = try stats::ttest_ind([1.0, 2.0, 3.0, 4.0], [6.0, 7.0, 8.0, 9.0]);
+    /// assert(r.result().rejects(5pct));
+    /// ```
+    pub fn rejects(self, alpha: f64) -> bool { self.pvalue < alpha }
+}
+
+impl Display for TestResult {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        let d = match self.df {
+            none => "",
+            k: f64 => f", df {k}",
+        };
+        try f.write_str(f"statistic {self.statistic:.6}, p-value {self.pvalue:.6e}{d}")
+    }
+}
+
+/// The p-value of `t` under Student's t with `df` degrees of freedom.
+pub(pkg) fn t_pvalue(t: f64, df: f64, alt: Alternative) -> f64 {
+    if t != t || !(df > 0.0) { return f64::NAN; }
+    let d = StudentT { nu: df };
+    match alt {
+        Alternative::TwoSided => (2.0 * d.tail(t)).min(1.0),
+        Alternative::Less => d.cdf(t),
+        Alternative::Greater => d.sf(t),
+    }
+}
+
+/// The p-value of a standard normal `z`.
+pub(pkg) fn z_pvalue(z: f64, alt: Alternative) -> f64 {
+    if z != z { return f64::NAN; }
+    match alt {
+        Alternative::TwoSided => (2.0 * ndtr(-z.abs())).min(1.0),
+        Alternative::Less => ndtr(z),
+        Alternative::Greater => ndtr(-z),
+    }
+}

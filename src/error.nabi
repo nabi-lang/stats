@@ -1,0 +1,91 @@
+// The one error type of the package. Each message says what went wrong
+// and what to write instead.
+
+use linalg::LinalgError;
+
+/// What went wrong in a statistics call.
+///
+/// ```nabi
+/// use stats::StatsError;
+///
+/// let e = try {
+///     _ = try stats::Normal::new(0.0, -1.0);
+///     StatsError::NotFinite { what: "" }
+/// } catch e: StatsError { e };
+/// assert(f"{e}".contains("sigma"));
+/// ```
+#[derive(Clone, PartialEq, Debug)]
+pub enum StatsError {
+    /// Fewer values than the statistic needs: `need` of `what`, `got`
+    /// given.
+    TooFew { what: str; need: usize; got: usize; },
+    /// A distribution parameter out of its range; `what` names it and
+    /// the range.
+    InvalidParameter { what: str; },
+    /// An argument out of its range (a probability above 1, an axis
+    /// past the rank, a negative weight); `what` says which.
+    InvalidArgument { what: str; },
+    /// Operands whose lengths or shapes do not fit; `what` names both.
+    ShapeMismatch { what: str; },
+    /// The input holds NaN or an infinity where the method cannot take
+    /// one.
+    NotFinite { what: str; },
+    /// A design matrix without full column rank (collinear columns), or
+    /// a singular covariance.
+    Singular { what: str; },
+    /// An iteration did not converge in `iterations` steps.
+    NoConvergence { what: str; iterations: usize; },
+}
+
+impl Display for StatsError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        let s = match self {
+            StatsError::TooFew { what, need, got } => f"{what} needs at least {need} values, got {got}; collect more data or drop the call for this group",
+            StatsError::InvalidParameter { what } => f"invalid parameter: {what}",
+            StatsError::InvalidArgument { what } => f"invalid argument: {what}",
+            StatsError::ShapeMismatch { what } => f"shapes do not fit: {what}",
+            StatsError::NotFinite { what } => f"{what} holds NaN or infinity; drop them first (`x[f64::is_finite.(x)]`) or use `stats::nan::` for the descriptive statistics",
+            StatsError::Singular { what } => f"{what} is singular; drop collinear columns (a column that is a combination of others, or a second intercept)",
+            StatsError::NoConvergence { what, iterations } => f"{what} did not converge in {iterations} iterations; rescale the input or raise `max_iter`",
+        };
+        try f.write_str(s)
+    }
+}
+
+impl Error for StatsError {}
+
+/// `TooFew` unless `got >= need`.
+pub(pkg) fn need(what: str, need: usize, got: usize) throws (StatsError) {
+    if got < need { throw StatsError::TooFew { what, need, got }; }
+}
+
+/// `InvalidParameter` unless `ok`.
+pub(pkg) fn param(ok: bool, what: str) throws (StatsError) {
+    if !ok { throw StatsError::InvalidParameter { what }; }
+}
+
+/// `InvalidArgument` unless `ok`.
+pub(pkg) fn arg(ok: bool, what: str) throws (StatsError) {
+    if !ok { throw StatsError::InvalidArgument { what }; }
+}
+
+/// `ShapeMismatch` unless `a == b`.
+pub(pkg) fn same(what: str, a: usize, b: usize) throws (StatsError) {
+    if a != b { throw StatsError::ShapeMismatch { what: f"{what}: {a} and {b} values; pass one value of each per observation" }; }
+}
+
+/// A linalg failure as the statistics error that explains it.
+pub(pkg) fn from_linalg(what: str, e: LinalgError) -> StatsError {
+    match e {
+        LinalgError::Singular { .. } => StatsError::Singular { what },
+        LinalgError::NotPositiveDefinite { .. } => StatsError::Singular { what },
+        LinalgError::NotFinite => StatsError::NotFinite { what },
+        LinalgError::NoConvergence { iterations } => StatsError::NoConvergence { what, iterations },
+        _ => StatsError::ShapeMismatch { what: f"{what}: {e}" },
+    }
+}
+
+/// `NotFinite` naming `what` unless every value is finite.
+pub(pkg) fn finite(what: str, v: pkg::Values) throws (StatsError) {
+    if !pkg::kernel::finite(v.d, 0, v.n) { throw StatsError::NotFinite { what }; }
+}

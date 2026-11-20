@@ -1,0 +1,68 @@
+// Fisher's exact test of a 2 x 2 table.
+
+use pkg::StatsError;
+use pkg::error::arg;
+use pkg::hypothesis::{Alternative, TestResult};
+use core::array::Matrix;
+use specfun::lcomb;
+
+/// Fisher's exact test of independence in a 2 x 2 table `[[a, b], [c,
+/// d]]`: with the margins fixed, `a` is hypergeometric. The statistic
+/// is the sample odds ratio `a d / (b c)`; the two-sided p-value sums
+/// the tables no more probable than the one observed (relative slack
+/// 1e-7, as R and SciPy). SciPy: `fisher_exact`.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// // The tea-tasting experiment (Fisher 1935): 3 of 4 cups right.
+/// let t: Matrix<f64> = [[3, 1], [1, 3]];
+/// let r = try stats::fisher_exact(t);
+/// assert(r.statistic == 9.0 && (r.pvalue - 0.4857142857142857).abs() < 1e-15);
+/// ```
+pub fn fisher_exact(table: Matrix<f64>, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TestResult {
+    let s = table.shape();
+    try arg(s[0] == 2 && s[1] == 2, f"fisher_exact: the table is {s[0]} x {s[1]}; it must be 2 x 2 (use chi2_contingency for larger tables)");
+    for i in 0..2usize {
+        for j in 0..2usize {
+            let x = table[i, j];
+            try arg(x >= 0.0 && x == x.floor() && x.is_finite(), f"fisher_exact: table[{i}, {j}] = {x}; counts must be whole numbers >= 0");
+        }
+    }
+    let (a, b, c, d) = (table[0, 0], table[0, 1], table[1, 0], table[1, 1]);
+    let odds = if b * c == 0.0 { if a * d == 0.0 { f64::NAN } else { f64::INFINITY } } else { a * d / (b * c) };
+    let n = a + b + c + d;
+    let row = a + b;
+    let col = a + c;
+    if row == 0.0 || col == 0.0 || row == n || col == n {
+        return TestResult { statistic: odds, pvalue: 1.0, df: none };
+    }
+    let lo = (row + col - n).max(0.0);
+    let hi = row.min(col);
+    // ln P(X = k) up to the constant ln C(n, row).
+    let lp = |k: f64| -> f64 { lcomb(col, k) + lcomb(n - col, row - k) };
+    let m = f64::NEG_INFINITY;
+    let k = lo;
+    while k <= hi {
+        m = m.max(lp(k));
+        k += 1.0;
+    }
+    let (total, sel) = (0.0, 0.0);
+    let obs = lp(a);
+    // P(k) <= P(a) (1 + 1e-7).
+    let slack = 1e-7f64.ln_1p();
+    let k = lo;
+    while k <= hi {
+        let l = lp(k);
+        let w = (l - m).exp();
+        total += w;
+        let take = match alternative {
+            Alternative::TwoSided => l <= obs + slack,
+            Alternative::Less => k <= a,
+            Alternative::Greater => k >= a,
+        };
+        if take { sel += w; }
+        k += 1.0;
+    }
+    TestResult { statistic: odds, pvalue: (sel / total).min(1.0), df: none }
+}

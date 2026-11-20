@@ -1,0 +1,121 @@
+// The Shapiro-Wilk test of normality, by Royston's algorithm AS R94
+// (1995): polynomial approximations of the coefficients a_i from the
+// normal scores, and of the null distribution of ln(1 - W) by a normal
+// with polynomial mean and spread in n (n >= 12) or a transformed
+// gamma-like form (4 <= n <= 11); exact for n = 3.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::error::{arg, finite, need};
+use pkg::hypothesis::TestResult;
+use pkg::kernel;
+use specfun::{ndtr, ndtri};
+
+const C1: [f64; 6] = [0.0, 0.221157, -0.147981, -2.07119, 4.434685, -2.706056];
+const C2: [f64; 6] = [0.0, 0.042981, -0.293762, -1.752461, 5.682633, -3.582633];
+const C3: [f64; 4] = [0.544, -0.39978, 0.025054, -6.714e-4];
+const C4: [f64; 4] = [1.3822, -0.77857, 0.062767, -0.0020322];
+const C5: [f64; 4] = [-1.5861, -0.31082, -0.083751, 0.0038915];
+const C6: [f64; 3] = [-0.4803, -0.082676, 0.0030302];
+const G: [f64; 2] = [-2.273, 0.459];
+
+fn poly<const N: usize>(c: [f64; N], x: f64) -> f64 {
+    let r = c[N - 1];
+    let k = N - 1;
+    while k > 0 {
+        k -= 1;
+        r = r * x + c[k];
+    }
+    r
+}
+
+/// The Shapiro-Wilk test that `x` comes from a normal distribution, `3
+/// <= n <= 5000`. The statistic `W` is near 1 for normal data; small
+/// p-values reject normality. Throws `TooFew` below 3 values,
+/// `InvalidArgument` above 5000 or for constant data. SciPy: `shapiro`
+/// (the same algorithm).
+///
+/// ```nabi
+/// let x = [148.0, 154.0, 158.0, 160.0, 161.0, 162.0, 166.0, 170.0, 182.0, 195.0, 236.0];
+/// let r = try stats::shapiro(x);
+/// assert(r.statistic < 0.8 && r.pvalue < 0.01);
+/// ```
+pub fn shapiro<X: Sample>(x: X) throws (StatsError) -> TestResult {
+    let v = x.values();
+    try need("shapiro", 3, v.n);
+    try arg(v.n <= 5000, f"shapiro: {v.n} values; the p-value approximation holds up to 5000 (use a random subsample or the Kolmogorov-Smirnov test)");
+    try finite("shapiro", v);
+    let n = v.n;
+    let s = kernel::copy(v.d, 0, n);
+    kernel::sort(s, 0, n);
+    let (lo, hi) = unsafe { (s.get(0), s.get(n - 1)) };
+    try arg(hi - lo > 0.0, "shapiro: all values are equal; there is nothing to test");
+    let an = n as f64;
+    let nn2 = n / 2;
+    let a = kernel::buf::<f64>(nn2);
+    if n == 3 {
+        unsafe { a.set(0, 0.7071067811865476); }
+    } else {
+        let an25 = an + 0.25;
+        let m = kernel::buf::<f64>(nn2);
+        let summ2 = 0.0;
+        unsafe {
+            for i in 0..nn2 {
+                let mi = ndtri((i as f64 + 1.0 - 0.375) / an25);
+                m.set(i, mi);
+                summ2 += mi * mi;
+            }
+            summ2 *= 2.0;
+            let ssumm2 = summ2.sqrt();
+            let rsn = 1.0 / an.sqrt();
+            let a1 = poly(C1, rsn) - m.get(0) / ssumm2;
+            let i1 = 1usize;
+            let fac = 0.0;
+            if n > 5 {
+                i1 = 2;
+                let a2 = -m.get(1) / ssumm2 + poly(C2, rsn);
+                fac = ((summ2 - 2.0 * m.get(0) * m.get(0) - 2.0 * m.get(1) * m.get(1)) / (1.0 - 2.0 * a1 * a1 - 2.0 * a2 * a2)).sqrt();
+                a.set(1, a2);
+            } else {
+                fac = ((summ2 - 2.0 * m.get(0) * m.get(0)) / (1.0 - 2.0 * a1 * a1)).sqrt();
+            }
+            a.set(0, a1);
+            for i in i1..nn2 { a.set(i, -m.get(i) / fac); }
+        }
+    }
+    // W = (sum a_i (x_(n+1-i) - x_(i)))^2 / sum (x - mean)^2, on the
+    // values scaled to their range for accuracy.
+    let mean = kernel::sum(s, 0, n) / an;
+    let (num, ssq) = (0.0, 0.0);
+    unsafe {
+        for i in 0..nn2 { num += a.get(i) * (s.get(n - 1 - i) - s.get(i)) / (hi - lo); }
+        for i in 0..n {
+            let d = (s.get(i) - mean) / (hi - lo);
+            ssq += d * d;
+        }
+    }
+    let w = (num * num / ssq).min(1.0);
+    let pw = if n == 3 {
+        // Exact: 6 / pi (asin(sqrt(W)) - asin(sqrt(3 / 4))).
+        (1.909859317102744 * (w.sqrt().asin() - 1.0471975511965979)).max(0.0)
+    } else {
+        let w1 = (1.0 - w).ln();
+        if n <= 11 {
+            let gamma = poly(G, an);
+            if w1 >= gamma {
+                1e-99
+            } else {
+                let y = -(gamma - w1).ln();
+                let mu = poly(C3, an);
+                let sd = poly(C4, an).exp();
+                ndtr(-(y - mu) / sd)
+            }
+        } else {
+            let xx = an.ln();
+            let mu = poly(C5, xx);
+            let sd = poly(C6, xx).exp();
+            ndtr(-(w1 - mu) / sd)
+        }
+    };
+    TestResult { statistic: w, pvalue: pw.min(1.0), df: none }
+}

@@ -1,0 +1,259 @@
+//! Descriptive statistics of one set of values: location, spread and
+//! shape. Sums are pairwise and variances corrected two-pass, so the
+//! error grows like eps log n rather than eps n. Empty input (or fewer
+//! values than `ddof` asks for) gives NaN, a NaN among the values gives
+//! NaN, as NumPy does; `stats::nan` skips NaN instead.
+
+pub mod order;
+
+use pkg::StatsError;
+use pkg::data::{Sample, Values};
+use pkg::error::{arg, same};
+use pkg::kernel;
+use core::array::Array;
+
+/// The sum of the values, by pairwise summation (O(n), error
+/// O(eps log n) of the sum of magnitudes); 0 when empty.
+///
+/// ```nabi
+/// assert(stats::sum([0.1, 0.2, 0.3]) == 0.6000000000000001);
+/// ```
+pub fn sum<X: Sample>(x: X) -> f64 {
+    let v = x.values();
+    kernel::sum(v.d, 0, v.n)
+}
+
+/// The arithmetic mean, by pairwise summation (O(n)); NaN when empty.
+///
+/// ```nabi
+/// assert(stats::mean([1.0, 2.0, 4.0, 5.0]) == 3.0);
+/// ```
+pub fn mean<X: Sample>(x: X) -> f64 { mean_of(x.values()) }
+
+pub(pkg) fn mean_of(v: Values) -> f64 { span_mean(v, 0, v.n) }
+
+pub(pkg) fn span_mean(v: Values, o: usize, n: usize) -> f64 {
+    if n == 0 { return f64::NAN; }
+    let m = kernel::sum(v.d, o, n) / n as f64;
+    if !m.is_finite() { return m; }
+    // One correction pass: the mean of the residuals.
+    let (r, _) = kernel::dev2(v.d, o, n, m);
+    m + r / n as f64
+}
+
+/// The weighted mean `sum(w x) / sum(w)`. Throws `ShapeMismatch` when
+/// the lengths differ and `InvalidArgument` for a negative weight or
+/// weights that sum to zero.
+///
+/// ```nabi
+/// assert(try stats::wmean([1.0, 2.0, 3.0], [3.0, 1.0, 0.0]) == 1.25);
+/// ```
+pub fn wmean<X: Sample, W: Sample>(x: X, w: W) throws (StatsError) -> f64 {
+    let (v, u) = (x.values(), w.values());
+    try same("wmean", v.n, u.n);
+    for i in 0..u.n { try arg(!(u.at(i) < 0.0), f"wmean: weight {i} is {u.at(i)}; weights must be >= 0"); }
+    let (sw, sx) = kernel::wsum(v.d, u.d, 0, v.n);
+    try arg(sw > 0.0, "wmean: the weights sum to 0; give at least one positive weight");
+    sx / sw
+}
+
+/// The variance `sum((x - mean)^2) / (n - ddof)` (corrected two-pass,
+/// Chan, Golub and LeVeque 1983). `ddof = 0` (the default, as NumPy) is
+/// the population variance and the MLE under normality; `ddof = 1` the
+/// unbiased sample variance. NaN when `n <= ddof`.
+///
+/// ```nabi
+/// let x = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+/// assert(stats::var(x) == 4.0);
+/// assert(stats::var(x, ddof: 1) == 32.0 / 7.0);
+/// ```
+pub fn var<X: Sample>(x: X, ddof: usize = 0) -> f64 { var_of(x.values(), ddof) }
+
+pub(pkg) fn var_of(v: Values, ddof: usize) -> f64 { span_var(v, 0, v.n, ddof) }
+
+pub(pkg) fn span_var(v: Values, o: usize, n: usize, ddof: usize) -> f64 {
+    if n <= ddof { return f64::NAN; }
+    let m = span_mean(v, o, n);
+    let (s1, s2) = kernel::dev2(v.d, o, n, m);
+    let ss = s2 - s1 * s1 / n as f64;
+    (if ss < 0.0 { 0.0 } else { ss }) / (n - ddof) as f64
+}
+
+/// The standard deviation, `sqrt(var(x, ddof))`.
+///
+/// ```nabi
+/// assert(stats::std([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]) == 2.0);
+/// ```
+pub fn std<X: Sample>(x: X, ddof: usize = 0) -> f64 { var_of(x.values(), ddof).sqrt() }
+
+/// The standard error of the mean, `std(x, ddof) / sqrt(n)`, with
+/// `ddof = 1` by default (SciPy's `sem`).
+///
+/// ```nabi
+/// let se = stats::sem([1.0, 2.0, 3.0, 4.0]);
+/// assert((se - 0.6454972243679028).abs() < 1e-15);
+/// ```
+pub fn sem<X: Sample>(x: X, ddof: usize = 1) -> f64 {
+    let v = x.values();
+    (var_of(v, ddof) / v.n as f64).sqrt()
+}
+
+/// The `k`-th central moment `sum((x - mean)^k) / n` (1 gives 0, 2 the
+/// population variance); NaN when empty.
+///
+/// ```nabi
+/// assert(stats::moment([1.0, 2.0, 3.0, 4.0, 5.0], 3) == 0.0);
+/// assert(stats::moment([1.0, 2.0, 3.0, 4.0, 5.0], 4) == 6.8);
+/// ```
+pub fn moment<X: Sample>(x: X, k: u32) -> f64 {
+    let v = x.values();
+    if v.n == 0 { return f64::NAN; }
+    if k == 0 { return 1.0; }
+    if k == 1 { return 0.0; }
+    let m = mean_of(v);
+    kernel::devk(v.d, 0, v.n, m, k as i32) / v.n as f64
+}
+
+/// The skewness `m3 / m2^1.5` of the central moments; with `bias:
+/// false` the adjusted Fisher-Pearson coefficient `G1 = g1 sqrt(n (n -
+/// 1)) / (n - 2)` (SciPy's `skew`). 0 for constant data; NaN when
+/// empty, or for `bias: false` below 3 values.
+///
+/// ```nabi
+/// let x = [1.0, 2.0, 3.0, 10.0];
+/// assert((stats::skew(x) - 1.0182337649086284).abs() < 1e-15); // SciPy: skew(x)
+/// ```
+pub fn skew<X: Sample>(x: X, bias: bool = true) -> f64 {
+    let v = x.values();
+    skew_of(v, 0, v.n, bias)
+}
+
+pub(pkg) fn skew_of(v: Values, o: usize, n: usize, bias: bool) -> f64 {
+    if n == 0 { return f64::NAN; }
+    let m = span_mean(v, o, n);
+    let (s1, s2, s3, _) = kernel::dev4(v.d, o, n, m);
+    let nf = n as f64;
+    let m2 = s2 / nf - (s1 / nf) * (s1 / nf);
+    let m3 = s3 / nf;
+    if m2 != m2 { return f64::NAN; }
+    // Constant data, up to rounding: no asymmetry.
+    if m2 <= 1e-28 * m * m || m2 == 0.0 { return 0.0; }
+    let g1 = m3 / (m2 * m2.sqrt());
+    if bias { return g1; }
+    if n < 3 { return f64::NAN; }
+    g1 * (nf * (nf - 1.0)).sqrt() / (nf - 2.0)
+}
+
+/// The kurtosis `m4 / m2^2`, minus 3 by default (`fisher: true`, the
+/// excess kurtosis, 0 for a normal sample in the limit); with `bias:
+/// false` the unbiased estimator `G2` of the k-statistics (SciPy's
+/// `kurtosis`). NaN when empty or constant, or for `bias: false` below
+/// 4 values.
+///
+/// ```nabi
+/// let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+/// assert((stats::kurtosis(x) + 1.3).abs() < 1e-14);
+/// assert((stats::kurtosis(x, fisher: false) - 1.7).abs() < 1e-14);
+/// ```
+pub fn kurtosis<X: Sample>(x: X, fisher: bool = true, bias: bool = true) -> f64 {
+    let v = x.values();
+    kurt_of(v, 0, v.n, fisher, bias)
+}
+
+pub(pkg) fn kurt_of(v: Values, o: usize, n: usize, fisher: bool, bias: bool) -> f64 {
+    if n == 0 { return f64::NAN; }
+    let m = span_mean(v, o, n);
+    let (s1, s2, _, s4) = kernel::dev4(v.d, o, n, m);
+    let nf = n as f64;
+    let m2 = s2 / nf - (s1 / nf) * (s1 / nf);
+    let m4 = s4 / nf;
+    if !(m2 > 0.0) { return f64::NAN; }
+    let b2 = m4 / (m2 * m2);
+    if !bias {
+        if n < 4 { return f64::NAN; }
+        let g2 = ((nf * nf - 1.0) * b2 - 3.0 * (nf - 1.0) * (nf - 1.0)) / ((nf - 2.0) * (nf - 3.0));
+        return if fisher { g2 } else { g2 + 3.0 };
+    }
+    if fisher { b2 - 3.0 } else { b2 }
+}
+
+/// The z-scores `(x - mean) / std(x, ddof)` of every element, in the
+/// shape of `a`. Constant data gives NaN (0 / 0), as SciPy does.
+///
+/// ```nabi
+/// use core::array::Vector;
+///
+/// let a: Vector<f64> = [1, 2, 3];
+/// let z = stats::zscore(a);
+/// assert(z[0] == -z[2] && z[1] == 0.0);
+/// ```
+pub fn zscore<const N: usize>(a: Array<f64, N>, ddof: usize = 0) -> Array<f64, N> {
+    let v = pkg::data::Sample::values(a);
+    let m = mean_of(v);
+    let s = var_of(v, ddof).sqrt();
+    (a .- m) ./ s
+}
+
+/// A summary of a set of values: count, mean, spread, quartiles and
+/// shape. `std` and `var` use `ddof = 1`, as `describe` in pandas.
+#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// ```nabi
+/// let s = stats::describe([2.0, 4.0, 4.0, 5.0]);
+/// assert(s.mean == 3.75 && s.max == 5.0 && s.q3 == 4.25);
+/// ```
+pub struct Summary {
+    /// The number of values.
+    pub n: usize;
+    pub mean: f64;
+    /// The sample variance (`ddof = 1`).
+    pub var: f64;
+    /// The sample standard deviation (`ddof = 1`).
+    pub std: f64;
+    pub min: f64;
+    /// The first quartile (linear interpolation).
+    pub q1: f64;
+    pub median: f64;
+    /// The third quartile.
+    pub q3: f64;
+    pub max: f64;
+    /// The biased skewness (`skew(x)`).
+    pub skew: f64;
+    /// The biased excess kurtosis (`kurtosis(x)`).
+    pub kurtosis: f64;
+}
+
+impl Display for Summary {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(f"n {self.n}, mean {self.mean:.6}, std {self.std:.6}, min {self.min:.6}, q1 {self.q1:.6}, median {self.median:.6}, q3 {self.q3:.6}, max {self.max:.6}, skew {self.skew:.6}, kurtosis {self.kurtosis:.6}")
+    }
+}
+
+/// The `Summary` of the values: one copy and a sort. O(n log n).
+///
+/// ```nabi
+/// let s = stats::describe([1.0, 2.0, 3.0, 4.0, 5.0]);
+/// assert(s.n == 5 && s.median == 3.0 && s.q1 == 2.0 && s.var == 2.5);
+/// ```
+pub fn describe<X: Sample>(x: X) -> Summary {
+    let v = x.values();
+    let n = v.n;
+    let m = mean_of(v);
+    let var = var_of(v, 1);
+    let q = order::sorted_copy(v);
+    let at = |p: f64| -> f64 { order::linear(q, n, p) };
+    let (lo, hi) = if n == 0 { (f64::NAN, f64::NAN) } else { (q.at(0), q.at(n - 1)) };
+    Summary {
+        n: n,
+        mean: m,
+        var: var,
+        std: var.sqrt(),
+        min: lo,
+        q1: at(0.25),
+        median: at(0.5),
+        q3: at(0.75),
+        max: hi,
+        skew: skew_of(v, 0, n, true),
+        kurtosis: kurt_of(v, 0, n, true, true),
+    }
+}

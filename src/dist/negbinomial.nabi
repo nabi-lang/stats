@@ -1,0 +1,74 @@
+// The negative binomial distribution: failures before the r-th success.
+
+use pkg::StatsError;
+use pkg::dist::{Discrete, Distribution, check, draw, search};
+use specfun::ndtri;
+use specfun::{betainc_factor as beta_prefix, betainc_pq as ibeta};
+use std::random::Rng;
+
+/// The negative binomial distribution: the number of failures before
+/// the `r`-th success in trials of probability `p` (SciPy's `nbinom`;
+/// `r > 0` need not be an integer). `P(X = k) = C(k + r - 1, k) p^r (1
+/// - p)^k`, CDF `I_p(r, k + 1)`; draws as Poisson(Gamma(r, (1 - p) /
+/// p)).
+///
+/// ```nabi
+/// use stats::{Discrete, NegativeBinomial};
+///
+/// let d = try NegativeBinomial::new(3.0, 0.5);
+/// assert((d.pmf(2) - 0.1875).abs() < 1e-16 && d.mean() == 3.0);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct NegativeBinomial {
+    pub(pkg) r: f64;
+    pub(pkg) p: f64;
+}
+
+impl NegativeBinomial {
+    /// NegativeBinomial(r, p), `r > 0` finite, `0 < p <= 1`.
+    pub fn new(r: f64, p: f64) throws (StatsError) -> NegativeBinomial {
+        try check(r > 0.0 && r.is_finite() && p > 0.0 && p <= 1.0, f"NegativeBinomial: r = {r}, p = {p}; need r > 0 and p in (0, 1]");
+        NegativeBinomial { r: r, p: p }
+    }
+
+    /// The number of successes.
+    pub fn successes(self) -> f64 { self.r }
+
+    /// The success probability.
+    pub fn p(self) -> f64 { self.p }
+}
+
+impl Distribution for NegativeBinomial {
+    type Value = i64;
+    fn sample<G: Rng>(self, ref g: G) -> i64 {
+        if self.p == 1.0 { return 0; }
+        let lam = draw::gamma(ref g, self.r) * (1.0 - self.p) / self.p;
+        draw::poisson(ref g, lam)
+    }
+}
+
+impl Discrete for NegativeBinomial {
+    fn pmf(self, k: i64) -> f64 {
+        if k < 0 { return 0.0; }
+        if self.p == 1.0 { return if k == 0 { 1.0 } else { 0.0 }; }
+        if k == 0 { return (self.r * self.p.ln()).exp(); }
+        // p^r q^(k + 1) / B(r, k + 1) / (q (k + r)).
+        let kf = k as f64;
+        beta_prefix(self.r, kf + 1.0, self.p, 1.0 - self.p) / ((1.0 - self.p) * (kf + self.r))
+    }
+    fn cdf(self, k: i64) -> f64 {
+        if k < 0 { return 0.0; }
+        if self.p == 1.0 { return 1.0; }
+        ibeta(self.r, (k + 1) as f64, self.p, 1.0 - self.p).0
+    }
+    fn sf(self, k: i64) -> f64 {
+        if k < 0 { return 1.0; }
+        if self.p == 1.0 { return 0.0; }
+        ibeta(self.r, (k + 1) as f64, self.p, 1.0 - self.p).1
+    }
+    fn ppf(self, q: f64) -> i64 {
+        search(self, q, self.mean() + self.var().sqrt() * ndtri(q.clamp(1e-300, 1.0 - 1e-16)), 0, i64::MAX)
+    }
+    fn mean(self) -> f64 { self.r * (1.0 - self.p) / self.p }
+    fn var(self) -> f64 { self.r * (1.0 - self.p) / (self.p * self.p) }
+}

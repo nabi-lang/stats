@@ -1,0 +1,265 @@
+// Kolmogorov-Smirnov tests. The one-sample two-sided p-value is exact
+// by the matrix method of Marsaglia, Tsang and Wang (2003) while its
+// matrix stays below 300 x 300, with the one-sided Birnbaum-Tingey
+// (1951) sum doubled in the far tail (exact for d >= 1/2) and
+// Kolmogorov's limit with Stephens' (1970) correction otherwise. The
+// two-sample p-value is exact by counting lattice paths (as
+// probabilities, so nothing overflows) up to n m = 1e7.
+
+use pkg::StatsError;
+use pkg::data::{Sample, Values};
+use pkg::dist::Continuous;
+use pkg::error::{finite, need};
+use pkg::hypothesis::{Alternative, TestResult};
+use pkg::kernel;
+use core::array::{Array, Matrix};
+use specfun::lcomb;
+
+const PI: f64 = 3.141592653589793;
+
+/// `P(D_n^+ >= d)`, one-sided, exact (Birnbaum and Tingey 1951).
+fn smirnov(n: usize, d: f64) -> f64 {
+    if d <= 0.0 { return 1.0; }
+    if d >= 1.0 { return 0.0; }
+    let nf = n as f64;
+    let jmax = (nf * (1.0 - d)).floor() as usize;
+    let s = 0.0;
+    for j in 0..jmax + 1 {
+        let jf = j as f64;
+        let base = 1.0 - d - jf / nf;
+        if base <= 0.0 { continue; }
+        let l = lcomb(nf, jf) + (nf - jf) * base.ln() + (jf - 1.0) * (d + jf / nf).ln();
+        s += l.exp();
+    }
+    (d * s).min(1.0)
+}
+
+/// Kolmogorov's limit `P(sqrt(n) D_n > lambda)`: the alternating series
+/// above 1, the theta-function form below.
+fn kolmogorov(l: f64) -> f64 {
+    if l <= 0.0 { return 1.0; }
+    if l < 1.0 {
+        let s = 0.0;
+        let k = 1.0;
+        while k < 20.0 {
+            let t = 2.0 * k - 1.0;
+            s += (-t * t * PI * PI / (8.0 * l * l)).exp();
+            k += 1.0;
+        }
+        return 1.0 - (2.0 * PI).sqrt() / l * s;
+    }
+    let s = 0.0;
+    let k = 1.0;
+    while k < 100.0 {
+        let t = (-2.0 * k * k * l * l).exp();
+        s += if (k as i64) % 2 == 1 { t } else { -t };
+        if t < 1e-17 { break; }
+        k += 1.0;
+    }
+    (2.0 * s).clamp(0.0, 1.0)
+}
+
+/// `P(D_n < d)` by the Marsaglia-Tsang-Wang matrix power.
+fn mtw(n: usize, d: f64) -> f64 {
+    let nd = n as f64 * d;
+    let k = nd.floor() as usize + 1;
+    let m = 2 * k - 1;
+    let h = k as f64 - nd;
+    let hm: Matrix<f64> = Array::zeros([m, m]);
+    for i in 0..m {
+        for j in 0..m {
+            if i + 1 >= j { hm[i, j] = 1.0; }
+        }
+    }
+    for i in 0..m {
+        hm[i, 0] = hm[i, 0] - h.powi((i + 1) as i32);
+        hm[m - 1, i] = hm[m - 1, i] - h.powi((m - i) as i32);
+    }
+    if 2.0 * h - 1.0 > 0.0 { hm[m - 1, 0] = hm[m - 1, 0] + (2.0 * h - 1.0).powi(m as i32); }
+    for i in 0..m {
+        for j in 0..m {
+            if i + 1 > j {
+                let g = 1.0;
+                for t in 1..i - j + 2 { g *= t as f64; }
+                hm[i, j] = hm[i, j] / g;
+            }
+        }
+    }
+    // H^n by squaring, rescaling by 1e-140 to keep the entries finite.
+    let (q, e) = power(hm, n, k);
+    let s = q[k - 1, k - 1];
+    let ex = e;
+    for i in 1..n + 1 {
+        s = s * i as f64 / n as f64;
+        if s < 1e-140 {
+            s *= 1e140;
+            ex -= 140;
+        }
+    }
+    s * 10.0.powi(ex as i32)
+}
+
+fn power(a: Matrix<f64>, n: usize, k: usize) -> (Matrix<f64>, i64) {
+    if n == 1 { return (a, 0i64); }
+    let (h, e) = power(a, n / 2, k);
+    let b = try! linalg::matmul(h, h);
+    let eb = 2 * e;
+    if n % 2 == 1 { b = try! linalg::matmul(a, b); }
+    if b[k - 1, k - 1] > 1e140 {
+        b = b .* 1e-140;
+        eb += 140;
+    }
+    (b, eb)
+}
+
+/// The two-sided p-value `P(D_n >= d)`.
+pub(pkg) fn ks_pvalue(n: usize, d: f64) -> f64 {
+    let nf = n as f64;
+    if d != d { return d; }
+    if d <= 0.5 / nf { return 1.0; }
+    if d >= 1.0 { return 0.0; }
+    let one = smirnov(n, d);
+    if d >= 0.5 || one < 1e-7 { return (2.0 * one).min(1.0); }
+    if 2 * (nf * d).floor() as usize + 1 <= 299 {
+        return (1.0 - mtw(n, d)).clamp(0.0, 1.0);
+    }
+    let s = nf.sqrt();
+    kolmogorov((s + 0.12 + 0.11 / s) * d)
+}
+
+fn statistic(v: Values, cdf: fn(f64) -> f64) -> (f64, f64) {
+    let n = v.n;
+    let s = kernel::copy(v.d, 0, n);
+    kernel::sort(s, 0, n);
+    let nf = n as f64;
+    let (dp, dm) = (0.0, 0.0);
+    for i in 0..n {
+        let f = cdf(unsafe { s.get(i) });
+        dp = dp.max((i + 1) as f64 / nf - f);
+        dm = dm.max(f - i as f64 / nf);
+    }
+    (dp, dm)
+}
+
+/// The one-sample Kolmogorov-Smirnov test of `x` against the
+/// continuous distribution `d`. Two-sided by default (statistic
+/// `sup |F_n - F|`); `Greater` uses `D+ = sup(F_n - F)`, `Less` uses
+/// `D- = sup(F - F_n)`, both with the exact Birnbaum-Tingey p-value.
+///
+/// ```nabi
+/// use stats::Normal;
+///
+/// let x = [-1.2, -0.5, 0.1, 0.3, 0.9, 1.6, -0.2, 0.4];
+/// let r = try stats::kstest(x, Normal::standard());
+/// // SciPy: kstest(x, 'norm') = (0.18353753872598688, 0.9085351243205685)
+/// assert((r.statistic - 0.18353753872598688).abs() < 1e-15);
+/// assert((r.pvalue - 0.9085351243205685).abs() < 1e-15);
+/// ```
+pub fn kstest<X: Sample, D: Continuous>(x: X, d: D, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TestResult {
+    let v = x.values();
+    try need("kstest", 1, v.n);
+    try finite("kstest", v);
+    let (dp, dm) = statistic(v, |t: f64| -> f64 { d.cdf(t) });
+    let n = v.n;
+    match alternative {
+        Alternative::TwoSided => {
+            let s = dp.max(dm);
+            TestResult { statistic: s, pvalue: ks_pvalue(n, s), df: none }
+        }
+        Alternative::Greater => TestResult { statistic: dp, pvalue: smirnov(n, dp), df: none },
+        Alternative::Less => TestResult { statistic: dm, pvalue: smirnov(n, dm), df: none },
+    }
+}
+
+/// The two-sample Kolmogorov-Smirnov test that `x` and `y` come from
+/// one distribution. The statistic is `sup |F_x - F_y|` (two-sided),
+/// `sup (F_x - F_y)` (`Greater`) or `sup (F_y - F_x)` (`Less`). The
+/// p-value is exact (lattice paths) for `n m <= 1e7`, else asymptotic
+/// as in SciPy.
+///
+/// ```nabi
+/// let x = [0.61, 0.29, 0.06, 0.59, -1.73, -0.74, 0.51, -0.56, 0.39, 1.64];
+/// let y = [2.17, 1.31, 3.03, 1.11, 0.05, 2.62, 1.65, 0.73, 2.21, 1.48];
+/// let r = try stats::ks_2samp(x, y);
+/// // SciPy: ks_2samp(x, y) = (0.8, 0.002056766762649115)
+/// assert(r.statistic == 0.8 && (r.pvalue - 0.002056766762649115).abs() < 1e-16);
+/// ```
+pub fn ks_2samp<X: Sample, Y: Sample>(x: X, y: Y, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TestResult {
+    let a = x.values();
+    let b = y.values();
+    try need("ks_2samp", 1, a.n);
+    try need("ks_2samp", 1, b.n);
+    try finite("ks_2samp", a);
+    try finite("ks_2samp", b);
+    let (n, m) = (a.n, b.n);
+    let sa = kernel::copy(a.d, 0, n);
+    let sb = kernel::copy(b.d, 0, m);
+    kernel::sort(sa, 0, n);
+    kernel::sort(sb, 0, m);
+    // i m - j n at each distinct value, exact in f64 below 2^53.
+    let (i, j) = (0usize, 0usize);
+    let (up, down) = (0.0, 0.0);
+    unsafe {
+        while i < n || j < m {
+            let t = if j >= m || (i < n && sa.get(i) <= sb.get(j)) { sa.get(i) } else { sb.get(j) };
+            while i < n && sa.get(i) <= t { i += 1; }
+            while j < m && sb.get(j) <= t { j += 1; }
+            let diff = (i * m) as f64 - (j * n) as f64;
+            up = up.max(diff);
+            down = down.max(-diff);
+        }
+    }
+    let nm = (n * m) as f64;
+    let (c, stat) = match alternative {
+        Alternative::TwoSided => {
+            let c = up.max(down);
+            (c, c / nm)
+        }
+        Alternative::Greater => (up, up / nm),
+        Alternative::Less => (down, down / nm),
+    };
+    let p = if nm <= 1e7 {
+        paths(n, m, c, alternative == Alternative::TwoSided)
+    } else {
+        let en = nm / (n + m) as f64;
+        if alternative == Alternative::TwoSided {
+            ks_pvalue(en.round() as usize, stat)
+        } else {
+            let z = en.sqrt() * stat;
+            (-2.0 * z * z - 2.0 * z * (m + 2 * n) as f64 / (nm * (n + m) as f64).sqrt() / 3.0).exp().min(1.0)
+        }
+    };
+    TestResult { statistic: stat, pvalue: p, df: none }
+}
+
+/// `P(D >= c / (n m))` for the two-sample statistic: one minus the
+/// probability that a random lattice path from (0, 0) to (n, m) keeps
+/// `|i m - j n| < c` (or `i m - j n < c` one-sided).
+fn paths(n: usize, m: usize, c: f64, two: bool) -> f64 {
+    if c <= 0.0 { return 1.0; }
+    let inside = |i: usize, j: usize| -> bool {
+        let d = (i * m) as f64 - (j * n) as f64;
+        if two { d.abs() < c } else { d < c }
+    };
+    let total = (n + m) as f64;
+    let row = kernel::buf::<f64>(m + 1);
+    unsafe {
+        row.set(0, 1.0);
+        for j in 1..m + 1 {
+            let prev = row.get(j - 1) * (m - j + 1) as f64 / (total - (j - 1) as f64);
+            row.set(j, if inside(0, j) { prev } else { 0.0 });
+        }
+        for i in 1..n + 1 {
+            let left = 0.0;
+            for j in 0..m + 1 {
+                let rem = total - (i + j) as f64 + 1.0;
+                let from_up = row.get(j) * (n - i + 1) as f64 / rem;
+                let from_left = if j == 0 { 0.0 } else { left * (m - j + 1) as f64 / rem };
+                let v = if inside(i, j) { from_up + from_left } else { 0.0 };
+                row.set(j, v);
+                left = v;
+            }
+        }
+        (1.0 - row.get(m)).clamp(0.0, 1.0)
+    }
+}

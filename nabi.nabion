@@ -1,0 +1,19 @@
+Package {
+    name: "stats",
+    version: "0.1.0",
+    nabi_version: "0.1.0",
+    toolchain: "0.1",
+    description: "Statistics on core arrays: descriptive statistics, special functions, distributions, hypothesis tests, regression, bootstrap",
+    license: "MIT OR Apache-2.0",
+    repository: "https://github.com/nabi-lang/stats",
+    keywords: ["statistics", "probability", "distributions", "regression", "hypothesis-testing"],
+    categories: ["mathematics", "science"],
+    deps: {
+        "linalg": Dep::path("../linalg", version: "^0.1"),
+        "specfun": Dep::path("../special", version: "^0.1", package: "special"),
+    },
+    features: {
+        "default": ["ops"],
+        "ops": [],
+    },
+}

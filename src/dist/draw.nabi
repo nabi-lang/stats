@@ -1,0 +1,31 @@
+// Variate generators shared by the distributions: the standard ones are
+// `Rng`'s (the normal ziggurat, Marsaglia-Tsang gamma, PTRS Poisson,
+// beta-splitting binomial), named here as the distributions call them.
+
+use std::random::Rng;
+
+const TWO_M52: f64 = 2.220446049250313e-16;
+
+/// A uniform value in [0, 1).
+pub(pkg) fn uniform<G: Rng>(ref g: G) -> f64 { g.f64() }
+
+/// A uniform value in (0, 1): never 0, so its log is finite.
+pub(pkg) fn open01<G: Rng>(ref g: G) -> f64 { ((g.next_u64() >> 12) as f64 + 0.5) * TWO_M52 }
+
+/// A standard normal deviate.
+pub(pkg) fn normal<G: Rng>(ref g: G) -> f64 { g.normal() }
+
+/// A standard exponential deviate.
+pub(pkg) fn exponential<G: Rng>(ref g: G) -> f64 { g.exponential() }
+
+/// A Gamma(k, 1) deviate, `k > 0`.
+pub(pkg) fn gamma<G: Rng>(ref g: G, k: f64) -> f64 { g.gamma(k) }
+
+/// A Beta(a, b) deviate.
+pub(pkg) fn beta<G: Rng>(ref g: G, a: f64, b: f64) -> f64 { g.beta(a, b) }
+
+/// A Poisson(lam) deviate.
+pub(pkg) fn poisson<G: Rng>(ref g: G, lam: f64) -> i64 { g.poisson(lam) }
+
+/// A Binomial(n, p) deviate.
+pub(pkg) fn binomial<G: Rng>(ref g: G, n: i64, p: f64) -> i64 { g.binomial(n, p) }

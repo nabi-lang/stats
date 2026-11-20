@@ -1,0 +1,224 @@
+//! Probability distributions as types. Each is built by a `new` that
+//! checks its parameters (throwing `InvalidParameter`), never panics
+//! afterwards, and implements `Distribution` (sampling) and either
+//! `Continuous` or `Discrete` (density, CDF, quantile, moments). The
+//! functions take one point; for an array use the broadcast call form
+//! `Normal::pdf.(d, xs)`.
+
+pub(pkg) mod draw;
+
+mod bernoulli;
+mod beta;
+mod binomial;
+mod cauchy;
+mod chisquared;
+mod exponential;
+mod fisher;
+mod gamma;
+mod geometric;
+mod laplace;
+mod lognormal;
+mod multinomial;
+mod mvnormal;
+mod negbinomial;
+mod normal;
+mod poisson;
+mod student;
+mod uniform;
+mod weibull;
+
+pub use bernoulli::Bernoulli;
+pub use beta::Beta;
+pub use binomial::Binomial;
+pub use cauchy::Cauchy;
+pub use chisquared::ChiSquared;
+pub use exponential::Exponential;
+pub use fisher::FisherF;
+pub use gamma::Gamma;
+pub use geometric::Geometric;
+pub use laplace::Laplace;
+pub use lognormal::LogNormal;
+pub use multinomial::Multinomial;
+pub use mvnormal::MultivariateNormal;
+pub use negbinomial::NegativeBinomial;
+pub use normal::Normal;
+pub use poisson::Poisson;
+pub use student::StudentT;
+pub use uniform::Uniform;
+pub use weibull::Weibull;
+
+use pkg::Interval;
+use core::array::Array;
+use std::random::Rng;
+
+const EPS: f64 = 2.220446049250313e-16;
+
+/// Something to draw random values from. `Value` is `f64` for the
+/// continuous distributions, `i64` for the discrete ones and a vector
+/// for the multivariate ones. Draws depend only on the generator's
+/// state, so a seeded `Xoshiro256PlusPlus` repeats them on every
+/// target.
+///
+/// ```nabi
+/// use stats::{Distribution, Normal};
+/// use std::random::Xoshiro256PlusPlus;
+///
+/// let g = Xoshiro256PlusPlus::seed(7);
+/// let d = try Normal::new(10.0, 2.0);
+/// let x = d.sample(ref g);
+/// let xs = d.samples(ref g, 1000);
+/// assert(xs.len() == 1000 && (stats::mean(xs) - 10.0).abs() < 0.3);
+/// ```
+pub trait Distribution {
+    /// The type of one draw.
+    type Value;
+
+    /// One draw, advancing `g`.
+    fn sample<G: Rng>(self, ref g: G) -> Value;
+
+    /// `n` independent draws.
+    fn samples<G: Rng>(self, ref g: G, n: usize) -> Array<Value, 1> {
+        let xs: List<Value> = List::with_capacity(n);
+        for _ in 0..n { xs.push(self.sample(ref g)); }
+        Array::view_list(xs, [n])
+    }
+
+    /// `n` independent copies as one distribution, whose draw is a
+    /// vector of `n` (for `g ~ d.iid(n)`).
+    fn iid(self, n: usize) -> Iid<Self> { Iid { d: self, n: n } }
+}
+
+/// `n` independent copies of `d`: a draw is `d.samples(g, n)`.
+///
+/// ```nabi
+/// use stats::{Distribution, Poisson};
+/// use std::random::Xoshiro256PlusPlus;
+///
+/// let g = Xoshiro256PlusPlus::seed(1);
+/// let ks = (try Poisson::new(3.0)).iid(5).sample(ref g);
+/// assert(ks.len() == 5);
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Iid<D> {
+    /// The distribution of each draw.
+    pub d: D;
+    /// The number of draws.
+    pub n: usize;
+}
+
+impl<D: Distribution> Distribution for Iid<D> {
+    type Value = Array<D::Value, 1>;
+    fn sample<G: Rng>(self, ref g: G) -> Array<D::Value, 1> { self.d.samples(ref g, self.n) }
+}
+
+/// A distribution on the real line with a density.
+///
+/// ```nabi
+/// use stats::{Continuous, Normal};
+///
+/// let d = Normal::standard();
+/// assert(d.cdf(0.0) == 0.5);
+/// assert((d.ppf(d.cdf(1.3)) - 1.3).abs() < 1e-15);
+/// let i = d.interval(95pct);
+/// assert((i.hi - 1.959963984540054).abs() < 1e-15);
+/// ```
+pub trait Continuous: Distribution<Value = f64> {
+    /// The density at `x`.
+    fn pdf(self, x: f64) -> f64;
+    /// `ln pdf(x)`, without underflow far in the tails.
+    fn logpdf(self, x: f64) -> f64 { self.pdf(x).ln() }
+    /// `P(X <= x)`.
+    fn cdf(self, x: f64) -> f64;
+    /// The survival function `P(X > x)`, accurate where it is small.
+    fn sf(self, x: f64) -> f64 { 1.0 - self.cdf(x) }
+    /// The quantile: the `x` with `cdf(x) = p`, `0 <= p <= 1` (NaN
+    /// otherwise).
+    fn ppf(self, p: f64) -> f64;
+    /// The `x` with `sf(x) = q`, accurate for small `q`.
+    fn isf(self, q: f64) -> f64 { self.ppf(1.0 - q) }
+    /// The mean (NaN when it does not exist, as for Cauchy).
+    fn mean(self) -> f64;
+    /// The variance (NaN or infinity when it does not exist).
+    fn var(self) -> f64;
+    /// The standard deviation.
+    fn std(self) -> f64 { self.var().sqrt() }
+    /// The median, `ppf(0.5)`.
+    fn median(self) -> f64 { self.ppf(0.5) }
+    /// The central interval holding probability `level`:
+    /// `[ppf((1 - level) / 2), isf((1 - level) / 2)]`.
+    fn interval(self, level: f64) -> Interval {
+        let a = 0.5 - 0.5 * level;
+        Interval { lo: self.ppf(a), hi: self.isf(a) }
+    }
+}
+
+/// A distribution on the integers.
+///
+/// ```nabi
+/// use stats::{Discrete, Binomial};
+///
+/// let d = try Binomial::new(10, 0.5);
+/// assert((d.pmf(5) - 0.24609375).abs() < 1e-15);
+/// assert(d.ppf(0.5) == 5);
+/// ```
+pub trait Discrete: Distribution<Value = i64> {
+    /// `P(X = k)`.
+    fn pmf(self, k: i64) -> f64;
+    /// `ln pmf(k)`.
+    fn logpmf(self, k: i64) -> f64 { self.pmf(k).ln() }
+    /// `P(X <= k)`.
+    fn cdf(self, k: i64) -> f64;
+    /// `P(X > k)`, accurate where it is small.
+    fn sf(self, k: i64) -> f64 { 1.0 - self.cdf(k) }
+    /// The smallest `k` with `cdf(k) >= p`, `0 <= p <= 1`; `i64::MIN`
+    /// for a `p` outside it.
+    fn ppf(self, p: f64) -> i64;
+    /// The mean.
+    fn mean(self) -> f64;
+    /// The variance.
+    fn var(self) -> f64;
+    /// The standard deviation.
+    fn std(self) -> f64 { self.var().sqrt() }
+}
+
+/// The smallest `k >= lo` with `cdf(k) >= p`, searched from `guess` by
+/// doubling steps then bisection. A relative slack of 64 eps keeps
+/// `ppf(cdf(k)) == k` when `cdf(k)` rounds.
+pub(pkg) fn search<D: Discrete>(d: D, p: f64, guess: f64, lo: i64, hi: i64) -> i64 {
+    if !(p >= 0.0 && p <= 1.0) { return i64::MIN; }
+    let target = p * (1.0 - 64.0 * EPS);
+    let ok = |k: i64| -> bool { d.cdf(k) >= target };
+    if p == 0.0 { return lo; }
+    let g = if guess != guess { lo as f64 } else { guess.clamp(lo as f64, hi as f64) };
+    let k = g as i64;
+    let (a, b) = (lo, hi);
+    if ok(k) {
+        b = k;
+        let step = 1i64;
+        while b > lo {
+            let t = if b - lo > step { b - step } else { lo };
+            if ok(t) { b = t; } else { a = t; break; }
+            step *= 2;
+        }
+        if b == lo && ok(lo) { return lo; }
+    } else {
+        a = k;
+        let step = 1i64;
+        loop {
+            let t = if hi - a > step { a + step } else { hi };
+            if ok(t) { b = t; break; }
+            a = t;
+            if t == hi { return hi; }
+            step *= 2;
+        }
+    }
+    // cdf(a) < target <= cdf(b)
+    while b - a > 1 {
+        let m = a + (b - a) / 2;
+        if ok(m) { b = m; } else { a = m; }
+    }
+    b
+}
+
+/// `InvalidParameter` naming `what` unless `ok`.
+pub(pkg) fn check(ok: bool, what: str) throws (pkg::StatsError) { try pkg::error::param(ok, what); }

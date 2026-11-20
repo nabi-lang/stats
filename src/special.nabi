@@ -1,0 +1,4 @@
+//! The special functions behind the distributions, from the `special`
+//! package.
+
+pub use specfun::{beta, betainc, betaincc, betaincinv, digamma, erf, erfc, erfcinv, erfinv, gamma, gammainc, gammaincc, gammainccinv, gammaincinv, lbeta, lgamma, ndtr, ndtri, trigamma};

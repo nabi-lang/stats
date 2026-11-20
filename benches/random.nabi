@@ -1,0 +1,53 @@
+// Draws per second from the samplers.
+
+use pkg::Distribution;
+use core::bench::Bench;
+use core::hint::black_box;
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+const N: usize = 10000000;
+
+#[bench]
+fn normal_1e7(b: Bench) {
+    let g = Xoshiro256PlusPlus::seed(1);
+    let d = pkg::Normal::standard();
+    b.set_items(N as i64);
+    b.iter([ref g] || d.samples(ref g, black_box(N)));
+}
+
+// The standard library's `Rng::normal` directly, for the cost of the
+// distribution layer.
+#[bench]
+fn normal_rng_1e7(b: Bench) {
+    let g = Xoshiro256PlusPlus::seed(1);
+    b.set_items(N as i64);
+    b.iter([ref g] || {
+        let xs: List<f64> = List::with_capacity(N);
+        for _ in 0..black_box(N) { xs.push(g.normal()); }
+        xs
+    });
+}
+
+#[bench]
+fn gamma_1e6(b: Bench) {
+    let g = Xoshiro256PlusPlus::seed(2);
+    let d = try! pkg::Gamma::new(2.5, 1.0);
+    b.set_items(1000000);
+    b.iter([ref g] || d.samples(ref g, black_box(1000000)));
+}
+
+#[bench]
+fn poisson_1e6(b: Bench) {
+    let g = Xoshiro256PlusPlus::seed(3);
+    let d = try! pkg::Poisson::new(40.0);
+    b.set_items(1000000);
+    b.iter([ref g] || d.samples(ref g, black_box(1000000)));
+}
+
+#[bench]
+fn binomial_1e6(b: Bench) {
+    let g = Xoshiro256PlusPlus::seed(4);
+    let d = try! pkg::Binomial::new(1000, 0.3);
+    b.set_items(1000000);
+    b.iter([ref g] || d.samples(ref g, black_box(1000000)));
+}

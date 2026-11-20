@@ -1,0 +1,209 @@
+// Rank tests: the Mann-Whitney U test of two independent samples and
+// the Wilcoxon signed-rank test of one sample or of pairs. Exact null
+// distributions by counting (Mann-Whitney: the coefficients of the
+// Gaussian binomial; Wilcoxon: subset sums of 1..n), else the normal
+// approximation with the tie correction, choosing as SciPy does.
+
+use pkg::StatsError;
+use pkg::correlation::{Ties, ranks};
+use pkg::data::{Sample, Values};
+use pkg::error::{finite, need, same};
+use pkg::hypothesis::{Alternative, TestResult, z_pvalue};
+use pkg::kernel;
+use core::array::Vector;
+
+/// `sum(t^3 - t)` over the groups of equal values of `v`.
+fn tie_term(v: Values) -> f64 {
+    let s = kernel::copy(v.d, 0, v.n);
+    kernel::sort(s, 0, v.n);
+    let t = 0.0;
+    let i = 0usize;
+    unsafe {
+        while i < v.n {
+            let j = i + 1;
+            while j < v.n && s.get(j) == s.get(i) { j += 1; }
+            let c = (j - i) as f64;
+            t += c * c * c - c;
+            i = j;
+        }
+    }
+    t
+}
+
+/// The counts of U = 0..n1 n2 over all splits: the coefficients of the
+/// Gaussian binomial [n1 + n2, n1]_q, built factor by factor as
+/// prod (1 - q^(n2 + i)) / (1 - q^i), as probabilities.
+fn u_dist(n1: usize, n2: usize) -> List<f64> {
+    let (a, b) = if n1 < n2 { (n1, n2) } else { (n2, n1) };
+    let len = a * b + 1;
+    let c: List<f64> = List::from_fn(len, |k| if k == 0 { 1.0 } else { 0.0 });
+    for i in 1..a + 1 {
+        // Multiply by (1 - q^(b + i)), then divide by (1 - q^i).
+        let k = len;
+        while k > b + i {
+            k -= 1;
+            c[k] -= c[k - b - i];
+        }
+        for k in i..len { c[k] += c[k - i]; }
+    }
+    let total = 0.0;
+    for k in 0..len { total += c[k]; }
+    List::from_fn(len, |k| c[k] / total)
+}
+
+/// The Mann-Whitney U test that `x` and `y` come from one distribution
+/// against a shift (SciPy's `mannwhitneyu`). The statistic is `U1 = R1
+/// - n1 (n1 + 1) / 2` for `x`. The p-value is exact when there are no
+/// ties and a sample has fewer than 8 values, else from the normal
+/// approximation with the tie correction and a continuity correction.
+///
+/// ```nabi
+/// let x = [19.0, 22.0, 16.0, 29.0, 24.0];
+/// let y = [20.0, 11.0, 17.0, 12.0];
+/// let r = try stats::mannwhitneyu(x, y);
+/// assert(r.statistic == 17.0 && (r.pvalue - 0.1111111111111111).abs() < 1e-15);
+/// ```
+pub fn mannwhitneyu<X: Sample, Y: Sample>(x: X, y: Y, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TestResult {
+    let a = x.values();
+    let b = y.values();
+    try need("mannwhitneyu", 1, a.n);
+    try need("mannwhitneyu", 1, b.n);
+    try finite("mannwhitneyu", a);
+    try finite("mannwhitneyu", b);
+    let (n1, n2) = (a.n, b.n);
+    let n = n1 + n2;
+    let all = Values::new(n);
+    for i in 0..n1 { unsafe { all.d.set(i, a.at(i)); } }
+    for i in 0..n2 { unsafe { all.d.set(n1 + i, b.at(i)); } }
+    let r = ranks(all, Ties::Average);
+    let r1 = kernel::sum(r.d, 0, n1);
+    let (f1, f2) = (n1 as f64, n2 as f64);
+    let u1 = r1 - f1 * (f1 + 1.0) / 2.0;
+    let u2 = f1 * f2 - u1;
+    let t = tie_term(all);
+    let p = if t == 0.0 && (n1 < 8 || n2 < 8) {
+        let dist = u_dist(n1, n2);
+        // P(U >= u) for the statistic of each tail.
+        let sf = |u: f64| -> f64 {
+            let k = u.ceil() as usize;
+            let s = 0.0;
+            for i in k..dist.len() { s += dist[i]; }
+            s
+        };
+        match alternative {
+            Alternative::TwoSided => (2.0 * sf(u1.max(u2))).min(1.0),
+            Alternative::Greater => sf(u1),
+            Alternative::Less => sf(u2),
+        }
+    } else {
+        let nf = n as f64;
+        let mu = f1 * f2 / 2.0;
+        let sd = (f1 * f2 / 12.0 * ((nf + 1.0) - t / (nf * (nf - 1.0)))).sqrt();
+        let u = match alternative {
+            Alternative::TwoSided => u1.max(u2),
+            Alternative::Greater => u1,
+            Alternative::Less => u2,
+        };
+        let z = (u - mu - 0.5) / sd;
+        let one = z_pvalue(z, Alternative::Greater);
+        if alternative == Alternative::TwoSided { (2.0 * one).min(1.0) } else { one }
+    };
+    TestResult { statistic: u1, pvalue: p, df: none }
+}
+
+/// The counts of W+ = 0..n(n+1)/2 over the 2^n sign patterns, as
+/// probabilities.
+fn w_dist(n: usize) -> List<f64> {
+    let len = n * (n + 1) / 2 + 1;
+    let c: List<f64> = List::from_fn(len, |k| if k == 0 { 1.0 } else { 0.0 });
+    for r in 1..n + 1 {
+        let k = len;
+        while k > r {
+            k -= 1;
+            c[k] += c[k - r];
+        }
+    }
+    let total = 2.0.powi(n as i32);
+    List::from_fn(len, |k| c[k] / total)
+}
+
+/// The Wilcoxon signed-rank test that the values `x` are symmetric
+/// about 0, or with `y` that the differences `x - y` of paired samples
+/// are. Zero values are dropped (Wilcoxon's method). The statistic is
+/// `min(W+, W-)` two-sided and `W+` one-sided, as SciPy. The p-value
+/// is exact for up to 50 nonzero values without ties, else from the
+/// normal approximation with the tie correction. SciPy: `wilcoxon(x,
+/// y)`.
+///
+/// ```nabi
+/// use stats::Alternative;
+///
+/// let d = [6.0, 8.0, 14.0, 16.0, 23.0, 24.0, 28.0, 29.0, 41.0, -48.0, 49.0, 56.0, 60.0, -67.0, 75.0];
+/// let r = try stats::wilcoxon(d);
+/// // SciPy: wilcoxon(d) = (24.0, 0.041259765625), exact.
+/// assert(r.statistic == 24.0 && r.pvalue == 0.041259765625);
+///
+/// let x = [125.0, 115.0, 130.0, 140.0, 140.0, 115.0, 140.0, 125.0, 140.0, 135.0];
+/// let r = try stats::wilcoxon(x, [110.0, 122.0, 125.0, 120.0, 140.0, 124.0, 123.0, 137.0, 135.0, 145.0]);
+/// assert(r.statistic == 18.0);
+/// let g = try stats::wilcoxon(d, alternative: Alternative::Greater);
+/// assert(g.pvalue < 0.041259765625);
+/// ```
+pub fn wilcoxon<X: Sample>(x: X, y: Vector<f64> | none = none, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TestResult {
+    let a = x.values();
+    try finite("wilcoxon", a);
+    match y {
+        none => try signed_rank(a, alternative),
+        y: Vector<f64> => {
+            let b = y.values();
+            try same("wilcoxon: x and y", a.n, b.n);
+            try finite("wilcoxon", b);
+            let t = Values::new(a.n);
+            for i in 0..a.n { unsafe { t.d.set(i, a.at(i) - b.at(i)); } }
+            try signed_rank(t, alternative)
+        }
+    }
+}
+
+fn signed_rank(d: Values, alternative: Alternative) throws (StatsError) -> TestResult {
+    let nz = Values::new(d.n);
+    let k = 0usize;
+    for i in 0..d.n {
+        if d.at(i) != 0.0 {
+            unsafe { nz.d.set(k, d.at(i)); }
+            k += 1;
+        }
+    }
+    let nz = Values { d: nz.d, n: k };
+    try need("wilcoxon (nonzero differences)", 1, k);
+    let mag = Values::new(k);
+    for i in 0..k { unsafe { mag.d.set(i, nz.at(i).abs()); } }
+    let r = ranks(mag, Ties::Average);
+    let (wp, wm) = (0.0, 0.0);
+    for i in 0..k {
+        if nz.at(i) > 0.0 { wp += r.at(i); } else { wm += r.at(i); }
+    }
+    let stat = if alternative == Alternative::TwoSided { wp.min(wm) } else { wp };
+    let t = tie_term(mag);
+    let p = if t == 0.0 && k <= 50 {
+        let dist = w_dist(k);
+        let cdf = |w: f64| -> f64 {
+            let s = 0.0;
+            for i in 0..(w.floor() as usize + 1).min(dist.len()) { s += dist[i]; }
+            s
+        };
+        let total = (k * (k + 1) / 2) as f64;
+        match alternative {
+            Alternative::TwoSided => (2.0 * cdf(wp.min(wm))).min(1.0),
+            Alternative::Less => cdf(wp),
+            // P(W+ >= w) = P(W+ <= total - w) by symmetry.
+            Alternative::Greater => cdf(total - wp),
+        }
+    } else {
+        let nf = k as f64;
+        let mn = nf * (nf + 1.0) / 4.0;
+        let se = (nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0 - t / 48.0).sqrt();
+        z_pvalue((wp - mn) / se, alternative)
+    };
+    TestResult { statistic: stat, pvalue: p, df: none }
+}

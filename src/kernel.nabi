@@ -1,0 +1,364 @@
+// Kernels on a run of f64 in a GC buffer, indexed without bounds
+// checks: sums (core's pairwise `Array::sum`, in parallel blocks for long
+// runs) and centered power sums, selection, sorting and ranking. Every
+// caller passes a buffer of at least `o + n` elements.
+
+use bare::mem::GcBuf;
+use core::array::Array;
+
+// Below this many values a centered sum is one loop; above it the run
+// is split in halves, as core's pairwise sum.
+const LEAF: usize = 128;
+// Runs this long are cut into blocks of `BLOCK` summed in parallel. The
+// cut does not depend on the thread count, so results are the same on
+// every machine.
+const BLOCK: usize = 65536;
+const PAR: usize = 262144;
+
+/// A fresh buffer of `n` zeros (one spare slot keeps `n = 0` valid).
+pub(pkg) fn buf<T>(n: usize) -> GcBuf<T> { unsafe { GcBuf::new(n + 1) } }
+
+/// `d[o..o + n]` as a vector, no copy.
+pub(pkg) fn run(d: GcBuf<f64>, o: usize, n: usize) -> Array<f64, 1> {
+    unsafe { Array::from_raw_parts(d, o, [n], [1]) }
+}
+
+/// The sum of `d[o..o + n]`, pairwise (core's `Array::sum`).
+pub(pkg) fn sum(d: GcBuf<f64>, o: usize, n: usize) -> f64 {
+    if n >= PAR { return blocks(d, o, n, 0.0, 0); }
+    psum(d, o, n)
+}
+
+fn psum(d: GcBuf<f64>, o: usize, n: usize) -> f64 { run(d, o, n).sum() }
+
+/// `sum((x - c)^k)` over `d[o..o + n]` for `k = 1, 2`, pairwise. The
+/// first is the correction term of the corrected two-pass variance
+/// (Chan, Golub and LeVeque 1983).
+pub(pkg) fn dev2(d: GcBuf<f64>, o: usize, n: usize, c: f64) -> (f64, f64) {
+    if n >= PAR {
+        return (blocks(d, o, n, c, 1), blocks(d, o, n, c, 2));
+    }
+    pdev2(d, o, n, c)
+}
+
+fn pdev2(d: GcBuf<f64>, o: usize, n: usize, c: f64) -> (f64, f64) {
+    if n <= LEAF {
+        let (s1a, s1b, s2a, s2b) = (0.0, 0.0, 0.0, 0.0);
+        let i = 0usize;
+        unsafe {
+            while i + 2 <= n {
+                let x = d.get(o + i) - c;
+                let y = d.get(o + i + 1) - c;
+                s1a += x;
+                s1b += y;
+                s2a += x * x;
+                s2b += y * y;
+                i += 2;
+            }
+            if i < n {
+                let x = d.get(o + i) - c;
+                s1a += x;
+                s2a += x * x;
+            }
+        }
+        return (s1a + s1b, s2a + s2b);
+    }
+    let h = (n / 2) & !7usize;
+    let (a1, a2) = pdev2(d, o, h, c);
+    let (b1, b2) = pdev2(d, o + h, n - h, c);
+    (a1 + b1, a2 + b2)
+}
+
+/// `sum((x - c)^k)` for `k = 1..4` over `d[o..o + n]`, pairwise.
+pub(pkg) fn dev4(d: GcBuf<f64>, o: usize, n: usize, c: f64) -> (f64, f64, f64, f64) {
+    if n <= LEAF {
+        let (s1, s2, s3, s4) = (0.0, 0.0, 0.0, 0.0);
+        unsafe {
+            for i in 0..n {
+                let x = d.get(o + i) - c;
+                let x2 = x * x;
+                s1 += x;
+                s2 += x2;
+                s3 += x2 * x;
+                s4 += x2 * x2;
+            }
+        }
+        return (s1, s2, s3, s4);
+    }
+    let h = (n / 2) & !7usize;
+    let (a1, a2, a3, a4) = dev4(d, o, h, c);
+    let (b1, b2, b3, b4) = dev4(d, o + h, n - h, c);
+    (a1 + b1, a2 + b2, a3 + b3, a4 + b4)
+}
+
+/// `sum((x - c)^k)` for one integer `k >= 0`, pairwise.
+pub(pkg) fn devk(d: GcBuf<f64>, o: usize, n: usize, c: f64, k: i32) -> f64 {
+    if n <= LEAF {
+        let s = 0.0;
+        unsafe {
+            for i in 0..n { s += (d.get(o + i) - c).powi(k); }
+        }
+        return s;
+    }
+    let h = (n / 2) & !7usize;
+    devk(d, o, h, c, k) + devk(d, o + h, n - h, c, k)
+}
+
+/// The pairwise sum of `x` (`k = 0`), `x - c` (`k = 1`) or `(x - c)^2`
+/// (`k = 2`) in fixed blocks of `BLOCK`, the blocks in parallel.
+fn blocks(d: GcBuf<f64>, o: usize, n: usize, c: f64, k: usize) -> f64 {
+    let nb = (n + BLOCK - 1) / BLOCK;
+    let parts: GcBuf<f64> = buf(nb);
+    par::for_each(0..nb, |b: usize| {
+        let s = o + b * BLOCK;
+        let len = BLOCK.min(o + n - s);
+        let v = if k == 0 {
+            psum(d, s, len)
+        } else {
+            let (s1, s2) = pdev2(d, s, len, c);
+            if k == 1 { s1 } else { s2 }
+        };
+        unsafe { parts.set(b, v); }
+    });
+    psum(parts, 0, nb)
+}
+
+/// `sum(w)` and `sum(w x)` over the first `n` of `x` and `w`, pairwise.
+pub(pkg) fn wsum(x: GcBuf<f64>, w: GcBuf<f64>, o: usize, n: usize) -> (f64, f64) {
+    if n <= LEAF {
+        let (sw, sx) = (0.0, 0.0);
+        unsafe {
+            for i in 0..n {
+                let wi = w.get(o + i);
+                sw += wi;
+                sx += wi * x.get(o + i);
+            }
+        }
+        return (sw, sx);
+    }
+    let h = (n / 2) & !7usize;
+    let (a, b) = wsum(x, w, o, h);
+    let (c, e) = wsum(x, w, o + h, n - h);
+    (a + c, b + e)
+}
+
+/// The smallest and largest of `d[o..o + n]`; NaN if one is NaN.
+pub(pkg) fn minmax(d: GcBuf<f64>, o: usize, n: usize) -> (f64, f64) {
+    let v = run(d, o, n);
+    (v.min() ?? f64::NAN, v.max() ?? f64::NAN)
+}
+
+/// Whether a NaN is among `d[o..o + n]`.
+pub(pkg) fn has_nan(d: GcBuf<f64>, o: usize, n: usize) -> bool {
+    unsafe {
+        for i in 0..n {
+            let x = d.get(o + i);
+            if x != x { return true; }
+        }
+    }
+    false
+}
+
+/// Whether every value of `d[o..o + n]` is finite.
+pub(pkg) fn finite(d: GcBuf<f64>, o: usize, n: usize) -> bool {
+    unsafe {
+        for i in 0..n {
+            if !d.get(o + i).is_finite() { return false; }
+        }
+    }
+    true
+}
+
+/// A copy of `d[o..o + n]` into a fresh buffer.
+pub(pkg) fn copy(d: GcBuf<f64>, o: usize, n: usize) -> GcBuf<f64> {
+    let c: GcBuf<f64> = buf(n);
+    unsafe {
+        for i in 0..n { c.set(i, d.get(o + i)); }
+    }
+    c
+}
+
+fn swap(d: GcBuf<f64>, i: usize, j: usize) {
+    unsafe {
+        let t = d.get(i);
+        d.set(i, d.get(j));
+        d.set(j, t);
+    }
+}
+
+/// Rearrange `d[lo..hi]` (no NaN) so that `d[k]` is the value a sort
+/// would put there, smaller ones before it and larger after. Hoare
+/// partitioning around a median of three; past a depth of 2 log2(n) it
+/// sorts the rest (introselect, Musser 1997), so the worst case is
+/// O(n log n) and the expected cost O(n).
+pub(pkg) fn select(d: GcBuf<f64>, lo: usize, hi: usize, k: usize) {
+    let (l, h) = (lo, hi);
+    let depth = 2 * bits(hi - lo);
+    while h - l > 16 {
+        if depth == 0 {
+            sort(d, l, h);
+            return;
+        }
+        depth -= 1;
+        let p = partition(d, l, h);
+        if k < p { h = p; } else { l = p; }
+    }
+    insertion(d, l, h);
+}
+
+fn bits(n: usize) -> usize {
+    let b = 0usize;
+    let m = n;
+    while m > 0 {
+        b += 1;
+        m >>= 1;
+    }
+    b
+}
+
+/// Hoare partition of `d[l..h]` (h - l > 16) around the median of the
+/// first, middle and last values; returns `p` with `d[l..p] <= pivot <=
+/// d[p..h]`, `l < p < h`.
+fn partition(d: GcBuf<f64>, l: usize, h: usize) -> usize {
+    let m = l + (h - l) / 2;
+    unsafe {
+        if d.get(m) < d.get(l) { swap(d, m, l); }
+        if d.get(h - 1) < d.get(l) { swap(d, h - 1, l); }
+        if d.get(h - 1) < d.get(m) { swap(d, h - 1, m); }
+        let pv = d.get(m);
+        let i = l;
+        let j = h - 1;
+        loop {
+            while d.get(i) < pv { i += 1; }
+            while pv < d.get(j) { j -= 1; }
+            if i >= j { return j + 1; }
+            swap(d, i, j);
+            i += 1;
+            j -= 1;
+        }
+    }
+}
+
+fn insertion(d: GcBuf<f64>, l: usize, h: usize) {
+    unsafe {
+        for i in l + 1..h {
+            let x = d.get(i);
+            let j = i;
+            while j > l && d.get(j - 1) > x {
+                d.set(j, d.get(j - 1));
+                j -= 1;
+            }
+            d.set(j, x);
+        }
+    }
+}
+
+/// Sort `d[l..h]` (no NaN) rising: introsort (quicksort with a median of
+/// three, heapsort past depth 2 log2(n), insertion sort below 17).
+/// O(n log n), not stable.
+pub(pkg) fn sort(d: GcBuf<f64>, l: usize, h: usize) {
+    intro(d, l, h, 2 * bits(h - l));
+}
+
+fn intro(d: GcBuf<f64>, l: usize, h: usize, depth: usize) {
+    let (a, b) = (l, h);
+    let dp = depth;
+    while b - a > 16 {
+        if dp == 0 {
+            heapsort(d, a, b);
+            return;
+        }
+        dp -= 1;
+        let p = partition(d, a, b);
+        // Recurse on the smaller side, loop on the larger.
+        if p - a < b - p {
+            intro(d, a, p, dp);
+            a = p;
+        } else {
+            intro(d, p, b, dp);
+            b = p;
+        }
+    }
+    insertion(d, a, b);
+}
+
+fn heapsort(d: GcBuf<f64>, l: usize, h: usize) {
+    let n = h - l;
+    let i = n / 2;
+    while i > 0 {
+        i -= 1;
+        sift(d, l, i, n);
+    }
+    let e = n;
+    while e > 1 {
+        e -= 1;
+        swap(d, l, l + e);
+        sift(d, l, 0, e);
+    }
+}
+
+fn sift(d: GcBuf<f64>, l: usize, root: usize, n: usize) {
+    let r = root;
+    loop {
+        let c = 2 * r + 1;
+        if c >= n { return; }
+        let m = c;
+        unsafe {
+            if c + 1 < n && d.get(l + c + 1) > d.get(l + c) { m = c + 1; }
+            if d.get(l + m) <= d.get(l + r) { return; }
+        }
+        swap(d, l + r, l + m);
+        r = m;
+    }
+}
+
+/// The positions `0..n` ordered by `d[o + i]` rising, ties in their
+/// original order (stable merge sort). O(n log n).
+pub(pkg) fn argsort(d: GcBuf<f64>, o: usize, n: usize) -> GcBuf<usize> {
+    let a: GcBuf<usize> = buf(n);
+    let t: GcBuf<usize> = buf(n);
+    unsafe {
+        for i in 0..n { a.set(i, i); }
+    }
+    let w = 1usize;
+    let src = a;
+    let dst = t;
+    while w < n {
+        let i = 0usize;
+        while i < n {
+            let m = (i + w).min(n);
+            let e = (i + 2 * w).min(n);
+            let (p, q, k) = (i, m, i);
+            unsafe {
+                while p < m && q < e {
+                    if d.get(o + dst_key(src, q)) < d.get(o + dst_key(src, p)) {
+                        dst.set(k, src.get(q));
+                        q += 1;
+                    } else {
+                        dst.set(k, src.get(p));
+                        p += 1;
+                    }
+                    k += 1;
+                }
+                while p < m {
+                    dst.set(k, src.get(p));
+                    p += 1;
+                    k += 1;
+                }
+                while q < e {
+                    dst.set(k, src.get(q));
+                    q += 1;
+                    k += 1;
+                }
+            }
+            i = e;
+        }
+        let x = src;
+        src = dst;
+        dst = x;
+        w *= 2;
+    }
+    src
+}
+
+fn dst_key(s: GcBuf<usize>, i: usize) -> usize { unsafe { s.get(i) } }

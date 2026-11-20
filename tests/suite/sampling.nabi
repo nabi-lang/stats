@@ -1,0 +1,143 @@
+// Sampling with fixed seeds: sample moments against the closed forms
+// (within 6 standard errors), Kolmogorov-Smirnov and chi-squared tests
+// of the draws against their own distribution, reproducibility.
+
+use pkg::tests::suite::{expect, rel};
+use pkg::{Continuous, Discrete, Distribution, Sampler};
+use core::array::{Array, Matrix, Vector};
+use std::random::Xoshiro256PlusPlus;
+
+const N: usize = 200000;
+
+fn moments<D: Continuous>(d: D, seed: u64, what: str) {
+    let g = Xoshiro256PlusPlus::seed(seed);
+    let x = d.samples(ref g, N);
+    let (m, s2) = (pkg::mean(x), pkg::var(x, ddof: 1));
+    let se = (d.var() / N as f64).sqrt();
+    expect((m - d.mean()).abs() <= 6.0 * se, f"{what}: mean {m} vs {d.mean()} (se {se})");
+    expect((s2 / d.var() - 1.0).abs() <= 0.05, f"{what}: var {s2} vs {d.var()}");
+    let k = try! pkg::kstest(x[:20000], d);
+    expect(k.pvalue > 1e-4, f"{what}: KS p = {k.pvalue}");
+}
+
+fn counts<D: Discrete>(d: D, seed: u64, hi: i64, what: str) {
+    let g = Xoshiro256PlusPlus::seed(seed);
+    let x = d.samples(ref g, N);
+    let f: List<f64> = List::from_fn((hi + 2) as usize, |_| 0.0);
+    let s = 0.0;
+    for k in x {
+        s += k as f64;
+        let b = if k > hi { hi + 1 } else { k };
+        f[b as usize] += 1.0;
+    }
+    let m = s / N as f64;
+    let se = (d.var() / N as f64).sqrt();
+    expect((m - d.mean()).abs() <= 6.0 * se, f"{what}: mean {m} vs {d.mean()}");
+    // Chi-squared of the counts against N pmf (the tail pooled).
+    let e: List<f64> = List::from_fn((hi + 2) as usize, |k| if k as i64 <= hi { N as f64 * d.pmf(k as i64) } else { N as f64 * d.sf(hi) });
+    let (o2, e2): (List<f64>, List<f64>) = ([], []);
+    for k in 0..e.len() {
+        if e[k] >= 5.0 {
+            o2.push(f[k]);
+            e2.push(e[k]);
+        }
+    }
+    let te = pkg::sum(e2);
+    let to = pkg::sum(o2);
+    let e3: List<f64> = List::from_fn(e2.len(), |i| e2[i] * to / te);
+    let r = try! pkg::chisquare(o2, Array::view_list(e3, [e3.len()]));
+    expect(r.pvalue > 1e-4, f"{what}: chi2 p = {r.pvalue}");
+}
+
+#[test]
+fn continuous() {
+    moments(pkg::Normal::standard(), 1, "normal");
+    moments(try! pkg::Normal::new(-3.0, 0.25), 2, "normal scaled");
+    moments(try! pkg::LogNormal::new(0.2, 0.5), 3, "lognormal");
+    moments(try! pkg::Uniform::new(-2.0, 5.0), 4, "uniform");
+    moments(try! pkg::Exponential::new(3.0), 5, "exponential");
+    moments(try! pkg::Gamma::new(0.3, 2.0), 6, "gamma k < 1");
+    moments(try! pkg::Gamma::new(7.5, 0.5), 7, "gamma");
+    moments(try! pkg::Beta::new(0.5, 2.5), 8, "beta");
+    moments(try! pkg::ChiSquared::new(4.0), 9, "chi2");
+    moments(try! pkg::StudentT::new(9.0), 10, "t");
+    moments(try! pkg::FisherF::new(6.0, 20.0), 11, "F");
+    moments(try! pkg::Laplace::new(1.0, 0.7), 12, "laplace");
+    moments(try! pkg::Weibull::new(1.7, 3.0), 13, "weibull");
+    // Cauchy has no moments: KS only.
+    let g = Xoshiro256PlusPlus::seed(14);
+    let c = try! pkg::Cauchy::new(2.0, 0.5);
+    expect((try! pkg::kstest(c.samples(ref g, 20000), c)).pvalue > 1e-4, "cauchy KS");
+}
+
+#[test]
+fn normal_shape() {
+    // 1e6 ziggurat draws: skewness and excess kurtosis near 0, the far
+    // tail (past r = 3.65, the ziggurat's base strip) at its rate.
+    let g = Xoshiro256PlusPlus::seed(99);
+    let n = 1000000usize;
+    let x = pkg::Normal::standard().samples(ref g, n);
+    expect(pkg::skew(x).abs() < 6.0 * (6.0 / n as f64).sqrt(), "skew");
+    expect(pkg::kurtosis(x).abs() < 6.0 * (24.0 / n as f64).sqrt(), "kurtosis");
+    let tail = 0.0;
+    for t in x {
+        if t.abs() > 3.7 { tail += 1.0; }
+    }
+    let want = 2.0 * pkg::special::ndtr(-3.7) * n as f64;
+    expect((tail - want).abs() < 6.0 * want.sqrt(), f"tail count {tail} vs {want}");
+}
+
+#[test]
+fn discrete() {
+    counts(try! pkg::Bernoulli::new(0.3), 21, 1, "bernoulli");
+    counts(try! pkg::Binomial::new(25, 0.4), 22, 25, "binomial small");
+    counts(try! pkg::Binomial::new(5000, 0.3), 23, 1700, "binomial split");
+    counts(try! pkg::Poisson::new(3.5), 24, 20, "poisson search");
+    counts(try! pkg::Poisson::new(250.0), 25, 400, "poisson PTRS");
+    counts(try! pkg::Geometric::new(0.15), 26, 80, "geometric");
+    counts(try! pkg::NegativeBinomial::new(3.5, 0.3), 27, 60, "negative binomial");
+}
+
+#[test]
+fn multivariate() {
+    let mu: Vector<f64> = [1, -2, 0.5];
+    let s: Matrix<f64> = [[2, 0.6, -0.3], [0.6, 1, 0.2], [-0.3, 0.2, 0.5]];
+    let d = try! pkg::MultivariateNormal::new(mu, s);
+    let g = Xoshiro256PlusPlus::seed(31);
+    let x = d.sample_rows(ref g, 100000);
+    let c = try! pkg::cov(x);
+    for i in 0..3 {
+        expect((pkg::mean(x[:, i]) - mu[i]).abs() < 0.02, f"mean {i}");
+        for j in 0..3 { expect((c[i, j] - s[i, j]).abs() < 0.03, f"cov[{i}, {j}] = {c[i, j]}"); }
+    }
+    let one = d.sample(ref g);
+    expect(one.len() == 3, "one draw");
+    let m = try! pkg::Multinomial::new(50, [0.1, 0.2, 0.7]);
+    let tot: List<f64> = [0.0, 0.0, 0.0];
+    for _ in 0..20000 {
+        let k = m.sample(ref g);
+        expect(k[0] + k[1] + k[2] == 50, "draws sum to n");
+        for i in 0..3 { tot[i] += k[i] as f64; }
+    }
+    for i in 0..3 { rel(tot[i] / 20000.0, m.mean()[i], 0.01, f"multinomial mean {i}"); }
+}
+
+#[test]
+fn reproducible() {
+    let d = try! pkg::Gamma::new(2.0, 1.0);
+    let a = Xoshiro256PlusPlus::seed(5);
+    let b = Xoshiro256PlusPlus::seed(5);
+    let x = d.samples(ref a, 1000);
+    let y = d.samples(ref b, 1000);
+    expect(x == y, "same seed, same draws");
+    // samples(n) is n calls of sample.
+    let c = Xoshiro256PlusPlus::seed(5);
+    for i in 0..10 { expect(d.sample(ref c) == x[i], "sample vs samples"); }
+    let s = Sampler::seed(5);
+    let t = Sampler::seed(5);
+    let u = d.sample(ref s);
+    expect(d.sample(ref s) != u, "a Sampler advances");
+    expect(d.sample(ref t) == u, "same seed");
+    let iid = d.iid(4).sample(ref t);
+    expect(iid.len() == 4, "iid");
+}

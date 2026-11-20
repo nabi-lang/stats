@@ -1,0 +1,12 @@
+//! Regression: ordinary and weighted least squares with inference,
+//! polynomial fits and logistic regression. Rows of the design matrix
+//! are observations, columns are predictors; an intercept column is
+//! added unless `intercept: false`.
+
+mod linear;
+mod logit;
+mod poly;
+
+pub use linear::{Ols, ols, wls};
+pub use logit::{Logistic, logistic};
+pub use poly::{polyfit, polyval};

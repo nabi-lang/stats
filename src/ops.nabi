@@ -1,0 +1,99 @@
+//! Notation for statistics (feature `ops`, on by default):
+//!
+//!   g ~ d       a draw from distribution d with the Sampler g; with
+//!               d.iid(n), n draws ("distributed as", level of `==`)
+//!   y ~ x       the least-squares fit of y on x with an intercept, as
+//!               R's `lm(y ~ x)`; a Result, since operators cannot throw
+//!   m ± h       the interval [m - h, m + h] (level of `+`)
+//!   95pct       the number 0.95, for confidence levels
+//!
+//! `~` has a second spelling, `∼` (U+223C TILDE OPERATOR). Prefix `~` is
+//! still bitwise not. `95%` cannot be a literal: `%` is a fixed operator
+//! and a number suffix must be a name. Every operator has a named form
+//! (`d.sample(ref g)`, `ols(x, y)`, `Interval::around(m, h)`).
+
+use pkg::dist::{Continuous, Distribution};
+use pkg::{Interval, Ols, Sampler, StatsError, ols};
+use core::array::{Matrix, Vector};
+
+/// `a ~ b` (also `a ∼ b`): "distributed as" or "modelled by". `g ~ d`
+/// draws from `d` with the `Sampler` `g` and advances `g` (a value of
+/// `d`'s `Value` type; `d.iid(n)` gives a vector of `n`); `y ~ x`
+/// regresses `y` on the columns of `x` (or on one vector) with an
+/// intercept and gives `Result<Ols, StatsError>`. Binds like `==`, so
+/// `g ~ d` needs no parentheses around arithmetic on either side and
+/// cannot be chained. Write it as an operator: the method name `tilde`
+/// does not pick one impl.
+///
+/// ```nabi
+/// use stats::{Distribution, Normal, Poisson, Sampler};
+/// use core::array::Vector;
+///
+/// let g = Sampler::seed(1);
+/// let x = g ~ Normal::standard();
+/// let k = g ~ try Poisson::new(3.0);
+/// let xs = g ∼ (try Normal::new(5.0, 2.0)).iid(100);
+/// assert(xs.len() == 100 && k >= 0 && x.is_finite());
+///
+/// let t: Vector<f64> = [1, 2, 3, 4];
+/// let y: Vector<f64> = [3.1, 4.9, 7.2, 8.8];
+/// let fit = try (y ~ t).get();
+/// assert((fit.coef[1] - 1.94).abs() < 1e-12);
+/// ```
+pub trait Tilde<Rhs> {
+    type Output;
+    #[infix("~", like = "==")]
+    #[infix("∼", like = "==")]
+    fn tilde(ref self, rhs: Rhs) -> Output;
+}
+
+impl<D: Distribution> Tilde<D> for Sampler {
+    type Output = D::Value;
+    fn tilde(ref self, d: D) -> D::Value { d.sample(ref self) }
+}
+
+impl Tilde<Matrix<f64>> for Vector<f64> {
+    type Output = Result<Ols, StatsError>;
+    fn tilde(ref self, x: Matrix<f64>) -> Result<Ols, StatsError> {
+        let y = self;
+        Result::catching(|| try ols(x, y))
+    }
+}
+
+impl Tilde<Vector<f64>> for Vector<f64> {
+    type Output = Result<Ols, StatsError>;
+    fn tilde(ref self, x: Vector<f64>) -> Result<Ols, StatsError> {
+        let y = self;
+        Result::catching(|| try ols(x[:, none], y))
+    }
+}
+
+/// `m ± h`: the interval `[m - h, m + h]`, binding like `+`, so `m ±
+/// 1.96 * se` is `m ± (1.96 * se)` and `a + b ± c` is `(a + b) ± c`.
+///
+/// ```nabi
+/// let se = 0.5;
+/// let ci = 10.0 ± 1.96 * se;
+/// assert(ci.lo == 9.02 && ci.hi == 10.98);
+/// assert(10.5 in ci);
+/// ```
+pub trait PlusMinus<Rhs = Self> {
+    type Output;
+    #[infix("±", like = "+")]
+    fn plus_minus(self, rhs: Rhs) -> Output;
+}
+
+impl PlusMinus for f64 {
+    type Output = Interval;
+    fn plus_minus(self, h: f64) -> Interval { Interval::around(self, h) }
+}
+
+/// `95pct` is `0.95`: a percentage written as a number, for confidence
+/// and significance levels (`t.ci(95pct)`, `r.rejects(5pct)`).
+/// Priority -1: a dependency of yours that registers `pct` wins.
+///
+/// ```nabi
+/// assert(95pct == 0.95 && 2.5pct == 0.025);
+/// ```
+#[literal(number "pct", priority = -1)]
+pub const fn percent(n: f64) -> f64 { n / 100.0 }

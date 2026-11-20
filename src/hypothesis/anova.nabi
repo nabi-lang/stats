@@ -1,0 +1,70 @@
+// One-way analysis of variance.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::descriptive::span_mean;
+use pkg::dist::{Continuous, FisherF};
+use pkg::error::{arg, finite, need};
+
+/// The outcome of a one-way ANOVA: `F`, its p-value and the two
+/// degrees of freedom.
+#[derive(Clone, Copy, PartialEq, Debug)]
+///
+/// ```nabi
+/// let r = try stats::f_oneway([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
+/// assert(r.df_between == 1.0 && r.df_within == 4.0 && r.statistic == 13.5);
+/// ```
+pub struct Anova {
+    /// `F = (SS_between / (k - 1)) / (SS_within / (N - k))`.
+    pub statistic: f64;
+    /// `P(F(k - 1, N - k) >= statistic)`.
+    pub pvalue: f64;
+    /// `k - 1`.
+    pub df_between: f64;
+    /// `N - k`.
+    pub df_within: f64;
+}
+
+/// The one-way ANOVA F-test that `k >= 2` groups share one mean
+/// (SciPy's `f_oneway`). The sums of squares are taken about the group
+/// means and the grand mean in two passes. Throws `TooFew` for fewer
+/// than 2 groups or an empty group, `InvalidArgument` when no degree of
+/// freedom is left within the groups.
+///
+/// ```nabi
+/// // Montgomery, Design and Analysis of Experiments, ex. 3.1 (etch rate).
+/// let a = [575.0, 542.0, 530.0, 539.0, 570.0];
+/// let b = [565.0, 593.0, 590.0, 579.0, 610.0];
+/// let c = [600.0, 651.0, 610.0, 637.0, 629.0];
+/// let d = [725.0, 700.0, 715.0, 685.0, 710.0];
+/// let r = try stats::f_oneway([a, b, c, d]);
+/// assert((r.statistic - 66.79707321945864).abs() < 1e-10 && r.df_within == 16.0);
+/// ```
+pub fn f_oneway<X: Sample>(groups: List<X>) throws (StatsError) -> Anova {
+    let k = groups.len();
+    try need("f_oneway (groups)", 2, k);
+    let vs: List<pkg::Values> = List::from_fn(k, |i| groups[i].values());
+    let total = 0usize;
+    let gsum = 0.0;
+    for i in 0..k {
+        try need("f_oneway (a group)", 1, vs[i].n);
+        try finite("f_oneway", vs[i]);
+        total += vs[i].n;
+        gsum += pkg::kernel::sum(vs[i].d, 0, vs[i].n);
+    }
+    try arg(total > k, f"f_oneway: {total} values in {k} groups leave no degree of freedom within them; each group needs a second value");
+    let grand = gsum / total as f64;
+    let (ssb, ssw) = (0.0, 0.0);
+    for i in 0..k {
+        let v = vs[i];
+        let m = span_mean(v, 0, v.n);
+        ssb += v.n as f64 * (m - grand) * (m - grand);
+        let (_, s2) = pkg::kernel::dev2(v.d, 0, v.n, m);
+        ssw += s2;
+    }
+    let dfb = (k - 1) as f64;
+    let dfw = (total - k) as f64;
+    let f = (ssb / dfb) / (ssw / dfw);
+    let p = if f != f { f } else { (FisherF { d1: dfb, d2: dfw }).sf(f) };
+    Anova { statistic: f, pvalue: p, df_between: dfb, df_within: dfw }
+}

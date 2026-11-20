@@ -1,0 +1,155 @@
+// Significance of correlation coefficients.
+
+use pkg::correlation::{Ties, knight, r_of, ranks};
+use pkg::data::Sample;
+use pkg::error::{finite, need, same};
+use pkg::hypothesis::{Alternative, TestResult, t_pvalue, z_pvalue};
+use pkg::{StatsError, Values};
+
+fn pair<X: Sample, Y: Sample>(what: str, x: X, y: Y, min: usize) throws (StatsError) -> (Values, Values) {
+    let (a, b) = (x.values(), y.values());
+    try same(what, a.n, b.n);
+    try need(what, min, a.n);
+    try finite(what, a);
+    try finite(what, b);
+    (a, b)
+}
+
+/// `r` with the t-test `t = r sqrt((n - 2) / (1 - r^2))` on `n - 2`
+/// degrees of freedom (exact for Pearson's r of normal data).
+fn r_test(r: f64, n: usize, alt: Alternative) -> TestResult {
+    let df = (n - 2) as f64;
+    let p = if r.abs() == 1.0 {
+        match alt {
+            Alternative::TwoSided => 0.0,
+            Alternative::Less => if r < 0.0 { 0.0 } else { 1.0 },
+            Alternative::Greater => if r > 0.0 { 0.0 } else { 1.0 },
+        }
+    } else {
+        t_pvalue(r * (df / ((1.0 - r) * (1.0 + r))).sqrt(), df, alt)
+    };
+    TestResult { statistic: r, pvalue: p, df: df }
+}
+
+/// Pearson's r and the p-value of `r = 0` for normal data (the t-test
+/// on `n - 2` degrees of freedom; SciPy's `pearsonr`). Throws `TooFew`
+/// below 3 pairs.
+///
+/// ```nabi
+/// let r = try stats::pearsonr([1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 1.0, 4.0, 3.0, 5.0]);
+/// // SciPy: pearsonr(x, y) = (0.8, 0.1040880386618278)
+/// assert((r.statistic - 0.8).abs() < 1e-15 && (r.pvalue - 0.1040880386618278).abs() < 1e-15);
+/// ```
+pub fn pearsonr<X: Sample, Y: Sample>(x: X, y: Y, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TestResult {
+    let (a, b) = try pair("pearsonr", x, y, 3);
+    r_test(r_of(a, b), a.n, alternative)
+}
+
+/// Spearman's rho and the p-value of `rho = 0` by the same t
+/// approximation (SciPy's `spearmanr`).
+///
+/// ```nabi
+/// let r = try stats::spearmanr([1.0, 2.0, 3.0, 4.0, 5.0], [5.0, 6.0, 7.0, 8.0, 7.0]);
+/// assert((r.statistic - 0.8207826816681233).abs() < 1e-15);
+/// ```
+pub fn spearmanr<X: Sample, Y: Sample>(x: X, y: Y, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TestResult {
+    let (a, b) = try pair("spearmanr", x, y, 3);
+    r_test(r_of(ranks(a, Ties::Average), ranks(b, Ties::Average)), a.n, alternative)
+}
+
+/// Kendall's tau-b and the p-value of `tau = 0`: exact (the
+/// distribution of inversions of a random permutation) for up to 33
+/// pairs without ties, else the normal approximation with the
+/// tie-corrected variance of Kendall (1970) (SciPy's `kendalltau`).
+///
+/// ```nabi
+/// let r = try stats::kendalltau([12.0, 2.0, 1.0, 12.0, 2.0], [1.0, 4.0, 7.0, 1.0, 0.0]);
+/// assert((r.statistic + 0.4714045207910316).abs() < 1e-15);
+/// assert((r.pvalue - 0.2827454599327748).abs() < 1e-14);
+/// ```
+pub fn kendalltau<X: Sample, Y: Sample>(x: X, y: Y, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TestResult {
+    let (a, b) = try pair("kendalltau", x, y, 2);
+    let n = a.n;
+    let (tau, n0, n1, n2, _, s) = knight(a, b);
+    if tau != tau { return TestResult { statistic: tau, pvalue: f64::NAN, df: none }; }
+    let dis = (n0 - s) / 2.0;
+    let p = if n1 == 0.0 && n2 == 0.0 && (n <= 33 || dis.min(n0 - dis) <= 1.0) {
+        // Discordant pairs d = (n0 - s) / 2 are the inversions of a
+        // random permutation under the null.
+        let dist = inversions(n);
+        let d = ((n0 - s) / 2.0).round() as usize;
+        let cdf = |k: usize| -> f64 {
+            let t = 0.0;
+            for i in 0..k.min(dist.len() - 1) + 1 { t += dist[i]; }
+            t
+        };
+        let m = n * (n - 1) / 2;
+        match alternative {
+            Alternative::TwoSided => (2.0 * cdf(d.min(m - d))).min(1.0),
+            // Few discordant pairs mean a positive tau.
+            Alternative::Greater => cdf(d),
+            Alternative::Less => cdf(m - d),
+        }
+    } else {
+        let nf = n as f64;
+        let (vt, vu, t2, u2, t1, u1) = (ties3(a), ties3(b), ties2(a), ties2(b), ties1(a), ties1(b));
+        let v0 = nf * (nf - 1.0) * (2.0 * nf + 5.0);
+        let var = (v0 - vt - vu) / 18.0 + t2 * u2 / (9.0 * nf * (nf - 1.0) * (nf - 2.0)) + t1 * u1 / (2.0 * nf * (nf - 1.0));
+        z_pvalue(s / var.sqrt(), alternative)
+    };
+    TestResult { statistic: tau, pvalue: p, df: none }
+}
+
+/// The distribution of inversions of a random permutation of `n`
+/// (Mahonian numbers over n!), built one element at a time.
+fn inversions(n: usize) -> List<f64> {
+    let m = n * (n - 1) / 2;
+    let p: List<f64> = List::from_fn(m + 1, |k| if k == 0 { 1.0 } else { 0.0 });
+    for j in 2..n + 1 {
+        // Insert element j: 0..j-1 new inversions, each with chance 1/j.
+        let top = j * (j - 1) / 2;
+        let q: List<f64> = List::from_fn(m + 1, |_| 0.0);
+        let run = 0.0;
+        for k in 0..top + 1 {
+            run += p[k];
+            if k >= j { run -= p[k - j]; }
+            q[k] = run / j as f64;
+        }
+        p = q;
+    }
+    p
+}
+
+fn groups(v: Values) -> List<f64> {
+    let s = pkg::kernel::copy(v.d, 0, v.n);
+    pkg::kernel::sort(s, 0, v.n);
+    let out: List<f64> = [];
+    let i = 0usize;
+    unsafe {
+        while i < v.n {
+            let j = i + 1;
+            while j < v.n && s.get(j) == s.get(i) { j += 1; }
+            if j - i > 1 { out.push((j - i) as f64); }
+            i = j;
+        }
+    }
+    out
+}
+
+fn ties1(v: Values) -> f64 {
+    let s = 0.0;
+    for t in groups(v) { s += t * (t - 1.0); }
+    s
+}
+
+fn ties2(v: Values) -> f64 {
+    let s = 0.0;
+    for t in groups(v) { s += t * (t - 1.0) * (t - 2.0); }
+    s
+}
+
+fn ties3(v: Values) -> f64 {
+    let s = 0.0;
+    for t in groups(v) { s += t * (t - 1.0) * (2.0 * t + 5.0); }
+    s
+}

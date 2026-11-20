@@ -1,0 +1,59 @@
+// Descriptive statistics of 1e7 uniform values. Items are values, so
+// items/s reads as values per second. The first step of each call is
+// the copy out of the `Array` (about 3 ns a value; see data.nabi).
+
+use core::array::Array;
+use core::bench::Bench;
+use core::hint::black_box;
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+const N: usize = 10000000;
+
+fn data() -> Array<f64, 1> {
+    let g = Xoshiro256PlusPlus::seed(1);
+    let xs: List<f64> = List::with_capacity(N);
+    for _ in 0..N { xs.push(g.f64()); }
+    Array::from_list(xs, [N])
+}
+
+#[bench]
+fn mean_1e7(b: Bench) {
+    let x = data();
+    b.set_items(N as i64);
+    b.iter(|| pkg::mean(black_box(x)));
+}
+
+#[bench]
+fn var_1e7(b: Bench) {
+    let x = data();
+    b.set_items(N as i64);
+    b.iter(|| pkg::var(black_box(x)));
+}
+
+#[bench]
+fn mean_list_1e7(b: Bench) {
+    let x: List<f64> = data().to_list();
+    b.set_items(N as i64);
+    b.iter(|| pkg::mean(black_box(x)));
+}
+
+#[bench]
+fn median_1e7(b: Bench) {
+    let x = data();
+    b.set_items(N as i64);
+    b.iter(|| pkg::median(black_box(x)));
+}
+
+#[bench]
+fn quantile_1e7(b: Bench) {
+    let x = data();
+    b.set_items(N as i64);
+    b.iter(|| try! pkg::quantile(black_box(x), 0.9));
+}
+
+#[bench]
+fn describe_1e6(b: Bench) {
+    let x = data()[:1000000];
+    b.set_items(1000000);
+    b.iter(|| pkg::describe(black_box(x)));
+}

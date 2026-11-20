@@ -1,0 +1,62 @@
+// Polynomial least-squares fits.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::error::{finite, need, same};
+use core::array::{Array, Matrix, Vector};
+
+/// The least-squares polynomial of degree `deg` through the points
+/// `(x, y)`: coefficients rising, `c[0] + c[1] x + ... + c[deg]
+/// x^deg`. The Vandermonde columns are scaled to unit norm before the
+/// solve (pivoted QR via `linalg::lstsq`), as NumPy's `polyfit`.
+/// Throws `TooFew` below `deg + 1` points.
+///
+/// ```nabi
+/// use core::array::Vector;
+///
+/// let x: Vector<f64> = [0, 1, 2, 3];
+/// let y: Vector<f64> = [1, 2, 5, 10];
+/// let c = try stats::polyfit(x, y, 2);
+/// assert((c[0] - 1.0).abs() < 1e-13 && (c[2] - 1.0).abs() < 1e-13);
+/// ```
+pub fn polyfit(x: Vector<f64>, y: Vector<f64>, deg: usize) throws (StatsError) -> Vector<f64> {
+    try same("polyfit: x and y", x.len(), y.len());
+    try need("polyfit", deg + 1, x.len());
+    try finite("polyfit", Sample::values(x));
+    try finite("polyfit", Sample::values(y));
+    let n = x.len();
+    let k = deg + 1;
+    let v: Matrix<f64> = Array::from_fn([n, k], |ix: [usize; 2]| -> f64 { x[ix[0]].powi(ix[1] as i32) });
+    let scale: List<f64> = List::from_fn(k, |j| {
+        let s = 0.0;
+        for i in 0..n { s += v[i, j] * v[i, j]; }
+        if s > 0.0 { s.sqrt() } else { 1.0 }
+    });
+    let sv: Vector<f64> = Array::view_list(scale, [k]);
+    let a = v ./ sv;
+    let c = try linalg::lstsq(a, y) catch e: linalg::LinalgError { throw pkg::error::from_linalg("polyfit: the Vandermonde matrix", e); };
+    c ./ sv
+}
+
+/// The polynomial with rising coefficients `c` at each element of `x`
+/// (Horner's rule), in the shape of `x`.
+///
+/// ```nabi
+/// use core::array::Vector;
+///
+/// let c: Vector<f64> = [1, 0, 2];
+/// let x: Vector<f64> = [0, 1, 3];
+/// assert(stats::polyval(c, x) == Vector::<f64>::from([1.0, 3.0, 19.0]));
+/// ```
+pub fn polyval<const N: usize>(c: Vector<f64>, x: Array<f64, N>) -> Array<f64, N> {
+    let k = c.len();
+    x.map(|t: f64| -> f64 {
+        let s = 0.0;
+        let i = k;
+        while i > 0 {
+            i -= 1;
+            s = s * t + c[i];
+        }
+        s
+    })
+}

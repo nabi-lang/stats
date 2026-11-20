@@ -1,0 +1,62 @@
+// Tests: the descriptive statistics, correlations, histograms and quantiles
+// against NumPy and SciPy, distributions against closed forms,
+// SciPy and round trips, the tests against textbook examples and
+// SciPy, regression against NIST's certified values and statsmodels,
+// sampling moments with fixed seeds, the operators, and that the
+// special functions are passed on. Each file names its sources.
+
+mod descriptive;
+mod dist;
+mod hypothesis;
+#[cfg(feature = "ops")]
+mod ops;
+mod regress;
+mod sampling;
+mod special;
+
+use core::array::Array;
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+pub const EPS: f64 = 2.220446049250313e-16;
+
+pub fn expect(ok: bool, what: str) {
+    if !ok { panic(f"check failed: {what}"); }
+}
+
+/// `|a - b| <= tol`.
+pub fn close(a: f64, b: f64, tol: f64, what: str) {
+    if !((a - b).abs() <= tol) { panic(f"check failed: {what}: {a} vs {b} (tol {tol})"); }
+}
+
+/// `|a - b| <= tol |b|` (or both NaN, or equal infinities).
+pub fn rel(a: f64, b: f64, tol: f64, what: str) {
+    if a != a && b != b { return; }
+    if a == b { return; }
+    if !((a - b).abs() <= tol * b.abs()) { panic(f"check failed: {what}: {a} vs {b} (rel {(a - b).abs() / b.abs()}, tol {tol})"); }
+}
+
+/// `n` uniform values in [lo, hi) from `seed`.
+pub fn uniform(n: usize, lo: f64, hi: f64, seed: u64) -> Array<f64, 1> {
+    let g = Xoshiro256PlusPlus::seed(seed);
+    let xs: List<f64> = List::with_capacity(n);
+    for _ in 0..n { xs.push(g.uniform(lo, hi)); }
+    Array::from_list(xs, [n])
+}
+
+/// The kind of a statistics error, for `throws_kind`.
+pub fn kind(e: pkg::StatsError) -> str {
+    match e {
+        pkg::StatsError::TooFew { .. } => "TooFew",
+        pkg::StatsError::InvalidParameter { .. } => "InvalidParameter",
+        pkg::StatsError::InvalidArgument { .. } => "InvalidArgument",
+        pkg::StatsError::ShapeMismatch { .. } => "ShapeMismatch",
+        pkg::StatsError::NotFinite { .. } => "NotFinite",
+        pkg::StatsError::Singular { .. } => "Singular",
+        pkg::StatsError::NoConvergence { .. } => "NoConvergence",
+    }
+}
+
+/// Whether `f` throws an error of kind `want`.
+pub fn throws_kind(f: fn() throws (pkg::StatsError), want: str) -> bool {
+    try { f(); false } catch e: pkg::StatsError { kind(e) == want }
+}

@@ -1,0 +1,105 @@
+// Student's t distribution with nu degrees of freedom.
+
+use pkg::StatsError;
+use pkg::dist::{Continuous, Distribution, check, draw};
+use specfun::{betainc_pq as ibeta, betainccinv, betaincinv, lbeta};
+use std::random::Rng;
+
+const PI: f64 = 3.141592653589793;
+
+/// Student's t distribution with `nu > 0` degrees of freedom (not
+/// necessarily an integer). The CDF is `I_x(nu / 2, 1 / 2)` with `x =
+/// nu / (nu + t^2)`, both `x` and `1 - x` formed directly so neither
+/// tail cancels; the quantile inverts it, with the closed forms for
+/// `nu` = 1 and 2.
+///
+/// ```nabi
+/// use stats::{Continuous, StudentT};
+///
+/// let d = try StudentT::new(10.0);
+/// // mpmath: 2.22813885198627475; SciPy 1.13 gives 2.2281388519649385.
+/// assert((d.ppf(0.975) - 2.2281388519862747).abs() < 1e-15);
+/// assert((d.cdf(-2.0) - 0.036694017385370196).abs() < 1e-16);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct StudentT {
+    pub(pkg) nu: f64;
+}
+
+impl StudentT {
+    /// Student's t with `nu` degrees of freedom (> 0; `inf` is not
+    /// allowed: use `Normal::standard()`).
+    pub fn new(nu: f64) throws (StatsError) -> StudentT {
+        try check(nu > 0.0 && nu.is_finite(), f"StudentT: nu = {nu}; the degrees of freedom must be finite and > 0 (for nu = inf use Normal::standard())");
+        StudentT { nu: nu }
+    }
+
+    /// The degrees of freedom.
+    pub fn df(self) -> f64 { self.nu }
+
+    /// `P(T <= -|t|)`, the lower tail at `-|t|`.
+    pub(pkg) fn tail(self, t: f64) -> f64 {
+        let t2 = t * t;
+        let d = self.nu + t2;
+        0.5 * ibeta(0.5 * self.nu, 0.5, self.nu / d, t2 / d).0
+    }
+}
+
+impl Distribution for StudentT {
+    type Value = f64;
+    fn sample<G: Rng>(self, ref g: G) -> f64 {
+        let z = draw::normal(ref g);
+        let c = 2.0 * draw::gamma(ref g, 0.5 * self.nu);
+        z / (c / self.nu).sqrt()
+    }
+}
+
+impl Continuous for StudentT {
+    fn pdf(self, x: f64) -> f64 { self.logpdf(x).exp() }
+    fn logpdf(self, x: f64) -> f64 {
+        let n = self.nu;
+        -0.5 * n.ln() - lbeta(0.5, 0.5 * n) - 0.5 * (n + 1.0) * (x * x / n).ln_1p()
+    }
+    fn cdf(self, x: f64) -> f64 {
+        if x != x { return x; }
+        if x == f64::INFINITY { return 1.0; }
+        if x == f64::NEG_INFINITY { return 0.0; }
+        let t = self.tail(x);
+        if x < 0.0 { t } else { 1.0 - t }
+    }
+    fn sf(self, x: f64) -> f64 { self.cdf(-x) }
+    fn ppf(self, p: f64) -> f64 {
+        if !(p >= 0.0 && p <= 1.0) { return f64::NAN; }
+        if p == 0.0 { return f64::NEG_INFINITY; }
+        if p == 1.0 { return f64::INFINITY; }
+        if p == 0.5 { return 0.0; }
+        let lo = p < 0.5;
+        // The tail probability, exact for p >= 1/2 (Sterbenz).
+        let q = if lo { p } else { 1.0 - p };
+        let t = if self.nu == 1.0 {
+            1.0 / (PI * q).tan()
+        } else if self.nu == 2.0 {
+            let a = 4.0 * q * (1.0 - q);
+            (2.0 / a).sqrt() * (1.0 - 2.0 * q)
+        } else {
+            // 2 q = I_x(nu / 2, 1 / 2) = 1 - I_y(1 / 2, nu / 2), y = 1 - x.
+            let y = betainccinv(0.5, 0.5 * self.nu, 2.0 * q);
+            let x = 1.0 - y;
+            if y > 0.5 {
+                x = betaincinv(0.5 * self.nu, 0.5, 2.0 * q);
+                y = 1.0 - x;
+            }
+            (self.nu * y / x).sqrt()
+        };
+        if lo { -t } else { t }
+    }
+    fn isf(self, q: f64) -> f64 {
+        if !(q >= 0.0 && q <= 1.0) { return f64::NAN; }
+        -self.ppf(q)
+    }
+    fn mean(self) -> f64 { if self.nu > 1.0 { 0.0 } else { f64::NAN } }
+    fn var(self) -> f64 {
+        if self.nu > 2.0 { self.nu / (self.nu - 2.0) } else if self.nu > 1.0 { f64::INFINITY } else { f64::NAN }
+    }
+    fn median(self) -> f64 { 0.0 }
+}

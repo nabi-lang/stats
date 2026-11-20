@@ -1,0 +1,55 @@
+// The chi-squared distribution with k degrees of freedom.
+
+use pkg::StatsError;
+use pkg::dist::{Continuous, Distribution, check, draw};
+use specfun::{gammainc_factor as gamma_prefix, gammainc_pq as gamma_pq, gammainccinv, gammaincinv, lgamma};
+use std::random::Rng;
+
+/// The chi-squared distribution with `k > 0` degrees of freedom
+/// (Gamma(k / 2, 2)); `k` need not be an integer.
+///
+/// ```nabi
+/// use stats::{ChiSquared, Continuous};
+///
+/// let d = try ChiSquared::new(3.0);
+/// assert((d.sf(7.814727903251178) - 0.05).abs() < 1e-15);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ChiSquared {
+    pub(pkg) k: f64;
+}
+
+impl ChiSquared {
+    /// Chi-squared with `k` degrees of freedom (finite, > 0).
+    pub fn new(k: f64) throws (StatsError) -> ChiSquared {
+        try check(k > 0.0 && k.is_finite(), f"ChiSquared: k = {k}; the degrees of freedom must be finite and > 0");
+        ChiSquared { k: k }
+    }
+
+    /// The degrees of freedom.
+    pub fn df(self) -> f64 { self.k }
+}
+
+impl Distribution for ChiSquared {
+    type Value = f64;
+    fn sample<G: Rng>(self, ref g: G) -> f64 { 2.0 * draw::gamma(ref g, 0.5 * self.k) }
+}
+
+impl Continuous for ChiSquared {
+    fn pdf(self, x: f64) -> f64 {
+        if x < 0.0 { return 0.0; }
+        if x == 0.0 { return if self.k < 2.0 { f64::INFINITY } else if self.k == 2.0 { 0.5 } else { 0.0 }; }
+        gamma_prefix(0.5 * self.k, 0.5 * x) / x
+    }
+    fn logpdf(self, x: f64) -> f64 {
+        if x < 0.0 { return f64::NEG_INFINITY; }
+        let h = 0.5 * self.k;
+        (h - 1.0) * x.ln() - 0.5 * x - lgamma(h) - h * 2.0.ln()
+    }
+    fn cdf(self, x: f64) -> f64 { if x <= 0.0 { 0.0 } else { gamma_pq(0.5 * self.k, 0.5 * x).0 } }
+    fn sf(self, x: f64) -> f64 { if x <= 0.0 { 1.0 } else { gamma_pq(0.5 * self.k, 0.5 * x).1 } }
+    fn ppf(self, p: f64) -> f64 { 2.0 * gammaincinv(0.5 * self.k, p) }
+    fn isf(self, q: f64) -> f64 { 2.0 * gammainccinv(0.5 * self.k, q) }
+    fn mean(self) -> f64 { self.k }
+    fn var(self) -> f64 { 2.0 * self.k }
+}

@@ -1,0 +1,52 @@
+// A closed interval of reals: confidence intervals, central intervals
+// of a distribution, bootstrap intervals.
+
+/// The closed interval `[lo, hi]`. `x in i` (or `x ∈ i`) tests
+/// membership.
+///
+/// ```nabi
+/// use stats::Interval;
+///
+/// let i = Interval { lo: 1.0, hi: 3.0 };
+/// assert(2.0 in i && !(4.0 in i));
+/// assert(i.mid() == 2.0 && i.width() == 2.0);
+/// assert(f"{i}" == "[1, 3]");
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Interval {
+    /// The lower end.
+    pub lo: f64;
+    /// The upper end.
+    pub hi: f64;
+}
+
+impl Interval {
+    /// `[mid - half, mid + half]`.
+    ///
+    /// ```nabi
+    /// assert(stats::Interval::around(5.0, 1.5).lo == 3.5);
+    /// ```
+    pub fn around(mid: f64, half: f64) -> Interval { Interval { lo: mid - half, hi: mid + half } }
+
+    /// `hi - lo`.
+    ///
+    /// ```nabi
+    /// assert(stats::Interval { lo: 1.0, hi: 4.0 }.width() == 3.0);
+    /// ```
+    pub fn width(self) -> f64 { self.hi - self.lo }
+
+    /// The midpoint.
+    ///
+    /// ```nabi
+    /// assert(stats::Interval { lo: 1.0, hi: 4.0 }.mid() == 2.5);
+    /// ```
+    pub fn mid(self) -> f64 { 0.5 * (self.lo + self.hi) }
+}
+
+impl ops::Contains<f64> for Interval {
+    fn contains(self, x: f64) -> bool { self.lo <= x && x <= self.hi }
+}
+
+impl Display for Interval {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"[{self.lo}, {self.hi}]") }
+}

@@ -1,0 +1,153 @@
+// Regression: OLS on Longley's data against NIST's certified values
+// (StRD, Longley 1967: the coefficients and standard errors to 15
+// digits), WLS and logistic regression against statsmodels 0.14,
+// polynomial fits against NumPy, and the operator forms.
+
+use pkg::tests::suite::{close, expect, rel, throws_kind};
+use core::array::{Array, Matrix, Vector};
+
+// Longley (1967), as in NIST StRD and statsmodels.datasets.longley
+const LONGLEY_X: [[f64; 6]; 16] = [[83.0, 234289.0, 2356.0, 1590.0, 107608.0, 1947.0], [88.5, 259426.0, 2325.0, 1456.0, 108632.0, 1948.0], [88.2, 258054.0, 3682.0, 1616.0, 109773.0, 1949.0], [89.5, 284599.0, 3351.0, 1650.0, 110929.0, 1950.0], [96.2, 328975.0, 2099.0, 3099.0, 112075.0, 1951.0], [98.1, 346999.0, 1932.0, 3594.0, 113270.0, 1952.0], [99.0, 365385.0, 1870.0, 3547.0, 115094.0, 1953.0], [100.0, 363112.0, 3578.0, 3350.0, 116219.0, 1954.0], [101.2, 397469.0, 2904.0, 3048.0, 117388.0, 1955.0], [104.6, 419180.0, 2822.0, 2857.0, 118734.0, 1956.0], [108.4, 442769.0, 2936.0, 2798.0, 120445.0, 1957.0], [110.8, 444546.0, 4681.0, 2637.0, 121950.0, 1958.0], [112.6, 482704.0, 3813.0, 2552.0, 123366.0, 1959.0], [114.2, 502601.0, 3931.0, 2514.0, 125368.0, 1960.0], [115.7, 518173.0, 4806.0, 2572.0, 127852.0, 1961.0], [116.9, 554894.0, 4007.0, 2827.0, 130081.0, 1962.0]];
+const LONGLEY_Y: [f64; 16] = [60323.0, 61122.0, 60171.0, 61187.0, 63221.0, 63639.0, 64989.0, 63761.0, 66019.0, 67857.0, 68169.0, 66513.0, 68655.0, 69564.0, 69331.0, 70551.0];
+const WX: [f64; 25] = [0.0, 0.4166666666666667, 0.8333333333333334, 1.25, 1.6666666666666667, 2.0833333333333335, 2.5, 2.916666666666667, 3.3333333333333335, 3.75, 4.166666666666667, 4.583333333333334, 5.0, 5.416666666666667, 5.833333333333334, 6.25, 6.666666666666667, 7.083333333333334, 7.5, 7.916666666666667, 8.333333333333334, 8.75, 9.166666666666668, 9.583333333333334, 10.0];
+const WY: [f64; 25] = [2.0, 3.4211842898193163, 3.393668447134228, 2.0176580218864846, 1.6007498834045624, 3.4000725437773363, 5.504837270946494, 5.278030989474023, 3.2008630838031378, 2.515711371048974, 4.7659149855725795, 7.396344482263622, 7.092873394321485, 4.484879124941805, 3.532984004176774, 6.107380069756832, 9.194497601743945, 8.877825249259446, 5.829654426724028, 4.6082333517072005, 7.42899205787805, 10.93182295789983, 10.646208246379492, 7.218591492005051, 5.723069821878507];
+const WLS_REF: [f64; 7] = [2.258649067592452, 0.6376465638239349, 0.4178358058096398, 0.1019806050642646, 0.6296017726929126, 0.6134975019404305, 0.7306432722918159];
+// Hours studied vs passing (Wikipedia, Logistic regression); statsmodels Logit
+const LX: [f64; 20] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25, 3.5, 4.0, 4.25, 4.5, 4.75, 5.0, 5.5];
+const LY: [f64; 20] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+const LOGIT_REF: [f64; 7] = [-4.077713431087631, 1.5046454283733333, 1.7609943141564703, 0.6287208459453855, -8.029878464344675, 27.725887222397812, 0.016702807340367873];
+const PX: [f64; 12] = [-2.0, -1.5454545454545454, -1.0909090909090908, -0.6363636363636365, -0.18181818181818188, 0.2727272727272725, 0.7272727272727271, 1.1818181818181817, 1.6363636363636362, 2.090909090909091, 2.545454545454545, 3.0];
+const PY: [f64; 12] = [6.206836860910392, 4.907179827001648, 3.6578275273420964, 2.4366867158628582, 1.3942479851039207, 0.4771701462796176, -0.13313803968580207, -0.5205561338996862, -0.4735662064462026, -0.10567907122397943, 0.8237285986122355, 2.172613536988787];
+const POLY_REF: [f64; 4] = [0.9992199014983753, -1.9958250247545248, 0.5010304019861579, 0.09868136892911361];
+
+// NIST StRD, Longley: certified values.
+const NIST_B: [f64; 7] = [-3482258.63459582, 15.0618722713733, -0.358191792925910e-1, -2.02022980381683, -1.03322686717359, -0.511041056535807e-1, 1829.15146461355];
+const NIST_SE: [f64; 7] = [890420.383607373, 84.9149257747669, 0.334910077722432e-1, 0.488399681651699, 0.214274163161675, 0.226073200069370, 455.478499142212];
+const NIST_SIGMA: f64 = 304.854073561965;
+const NIST_R2: f64 = 0.995479004577296;
+
+fn longley() -> (Matrix<f64>, Vector<f64>) {
+    let x: Matrix<f64> = Array::from_fn([16, 6], |ix: [usize; 2]| -> f64 { LONGLEY_X[ix[0]][ix[1]] });
+    let y: Vector<f64> = Array::from_list(List::from_fn(16, |i| LONGLEY_Y[i]), [16]);
+    (x, y)
+}
+
+#[test]
+fn longley_certified() {
+    let (x, y) = longley();
+    let m = try! pkg::ols(x, y);
+    // Longley's design has condition number about 5e9, so 15 digits
+    // are not all reachable in f64; NIST asks for about 7 to 9.
+    for i in 0..7 {
+        rel(m.coef[i], NIST_B[i], 1e-9, f"coef {i}");
+        rel(m.se[i], NIST_SE[i], 1e-9, f"se {i}");
+    }
+    rel(m.sigma, NIST_SIGMA, 1e-10, "sigma");
+    rel(m.r2, NIST_R2, 1e-12, "r2");
+    expect(m.df_resid == 9.0 && m.df_model == 6.0, "df");
+    // Residuals are orthogonal to the design.
+    let g = try! linalg::vecmat(m.resid, x);
+    for j in 0..6 { close(g[j], 0.0, 1e-4 * 1e5, f"X^T e [{j}]"); }
+    let s = 0.0;
+    for e in m.resid { s += e; }
+    close(s, 0.0, 1e-6, "residuals sum to 0 with an intercept");
+    let ci = m.ci(0.95);
+    expect(m.coef[1] in ci[1], "estimate inside its interval");
+}
+
+#[test]
+fn ols_basics() {
+    let x: Matrix<f64> = [[1, 0], [2, 1], [3, 1], [4, 3], [5, 2]];
+    let y: Vector<f64> = [3, 4, 6, 6, 9];
+    let m = try! pkg::ols(x, y);
+    close(m.coef[0], 1.0, 1e-13, "b0");
+    close(m.coef[1], 2.0, 1e-13, "b1");
+    close(m.coef[2], -1.0, 1e-13, "b2");
+    close(m.r2, 1.0, 1e-15, "exact fit");
+    let n = try! pkg::ols(x, y, intercept: false);
+    expect(n.coef.len() == 2 && !n.intercept, "no intercept");
+    let p = try! m.predict(x);
+    for i in 0..5 { close(p[i], y[i], 1e-12, "predict"); }
+    let dup: Matrix<f64> = [[1, 2], [2, 4], [3, 6], [4, 8.0]];
+    let yd: Vector<f64> = [1, 2, 3, 5];
+    expect(throws_kind(|| { _ = try pkg::ols(dup, yd); }, "Singular"), "collinear");
+    let short: Vector<f64> = [1, 2];
+    expect(throws_kind(|| { _ = try pkg::ols(x, short); }, "ShapeMismatch"), "lengths");
+    let few: Matrix<f64> = [[1, 2], [3, 4]];
+    expect(throws_kind(|| { _ = try pkg::ols(few, short); }, "TooFew"), "too few rows");
+    let bad: Vector<f64> = [3, 4, f64::NAN, 6, 9];
+    expect(throws_kind(|| { _ = try pkg::ols(x, bad); }, "NotFinite"), "NaN");
+}
+
+#[test]
+fn weighted() {
+    let x: Matrix<f64> = Array::from_fn([25, 1], |ix: [usize; 2]| -> f64 { WX[ix[0]] });
+    let y: Vector<f64> = Array::from_list(List::from_fn(25, |i| WY[i]), [25]);
+    let w: Vector<f64> = Array::from_list(List::from_fn(25, |i| 1.0 / (1.0 + WX[i])), [25]);
+    let m = try! pkg::wls(x, y, w);
+    rel(m.coef[0], WLS_REF[0], 1e-13, "wls b0");
+    rel(m.coef[1], WLS_REF[1], 1e-13, "wls b1");
+    rel(m.se[0], WLS_REF[2], 1e-12, "wls se0");
+    rel(m.se[1], WLS_REF[3], 1e-12, "wls se1");
+    rel(m.r2, WLS_REF[4], 1e-12, "wls r2");
+    rel(m.adj_r2, WLS_REF[5], 1e-12, "wls adj r2");
+    rel(m.sigma, WLS_REF[6], 1e-12, "wls sigma");
+    let neg = w .* -1.0;
+    expect(throws_kind(|| { _ = try pkg::wls(x, y, neg); }, "InvalidArgument"), "negative weights");
+}
+
+#[test]
+fn logistic_fit() {
+    let x: Matrix<f64> = Array::from_fn([20, 1], |ix: [usize; 2]| -> f64 { LX[ix[0]] });
+    let y: Vector<f64> = Array::from_list(List::from_fn(20, |i| LY[i]), [20]);
+    let m = try! pkg::logistic(x, y);
+    expect(m.converged, "converged");
+    rel(m.coef[0], LOGIT_REF[0], 1e-10, "intercept");
+    rel(m.coef[1], LOGIT_REF[1], 1e-10, "slope");
+    rel(m.se[0], LOGIT_REF[2], 1e-9, "se0");
+    rel(m.se[1], LOGIT_REF[3], 1e-9, "se1");
+    rel(m.loglik, LOGIT_REF[4], 1e-12, "loglik");
+    rel(m.null_deviance, LOGIT_REF[5], 1e-12, "null deviance");
+    rel(m.p[1], LOGIT_REF[6], 1e-8, "slope p");
+    let p = try! m.predict_proba(x);
+    expect(p[0] < 0.1 && p[19] > 0.9, "probabilities");
+    let sep: Matrix<f64> = [[1], [2], [3], [4]];
+    let ys: Vector<f64> = [0, 0, 1, 1];
+    expect(throws_kind(|| { _ = try pkg::logistic(sep, ys); }, "InvalidArgument"), "separated");
+    let yb: Vector<f64> = [0, 2, 1, 1];
+    expect(throws_kind(|| { _ = try pkg::logistic(sep, yb); }, "InvalidArgument"), "not 0/1");
+}
+
+#[test]
+fn polynomials() {
+    let x: Vector<f64> = Array::from_list(List::from_fn(12, |i| PX[i]), [12]);
+    let y: Vector<f64> = Array::from_list(List::from_fn(12, |i| PY[i]), [12]);
+    let c = try! pkg::polyfit(x, y, 3);
+    for i in 0..4 { rel(c[i], POLY_REF[i], 1e-12, f"coef {i}"); }
+    let v = pkg::polyval(c, x);
+    expect(v.len() == 12, "polyval shape");
+    let m: Matrix<f64> = [[0, 1], [2, 3]];
+    let cs: Vector<f64> = [1, 1];
+    expect(pkg::polyval(cs, m)[1, 1] == 4.0, "polyval on a matrix");
+    expect(throws_kind(|| { _ = try pkg::polyfit(x[:3], y[:3], 3); }, "TooFew"), "too few points");
+}
+
+#[test]
+fn resampling() {
+    let x = [2.1, 3.4, 1.9, 5.6, 4.4, 3.3, 2.8, 4.1, 3.9, 2.5, 7.9, 3.0];
+    let f = |v: Vector<f64>| -> f64 { pkg::mean(v) };
+    let a = try! pkg::bootstrap(x, f, 4000, 0.95, pkg::BootMethod::Bca, 11);
+    let b = try! pkg::bootstrap(x, f, 4000, 0.95, pkg::BootMethod::Bca, 11);
+    expect(a.ci == b.ci && a.replicates == b.replicates, "same seed, same result");
+    rel(a.estimate, pkg::mean(x), 0.0, "estimate");
+    // The bootstrap se of the mean is about s / sqrt(n) (ddof 0).
+    rel(a.se, pkg::std(x) / 12.0.sqrt(), 0.05, "se");
+    let p = try! pkg::bootstrap(x, f, 4000, 0.95, pkg::BootMethod::Percentile, 11);
+    let q = try! pkg::bootstrap(x, f, 4000, 0.95, pkg::BootMethod::Basic, 11);
+    // Basic is the percentile interval reflected about the estimate.
+    close(q.ci.lo, 2.0 * p.estimate - p.ci.hi, 1e-12, "basic lo");
+    // A right-skewed sample: BCa moves the interval right of percentile.
+    expect(a.ci.hi >= p.ci.hi && a.estimate in a.ci, "bca shift");
+    expect(throws_kind(|| { _ = try pkg::bootstrap(x, f, 100, 1.5); }, "InvalidArgument"), "level");
+    expect(throws_kind(|| { _ = try pkg::bootstrap([1.0], f); }, "TooFew"), "one value");
+}

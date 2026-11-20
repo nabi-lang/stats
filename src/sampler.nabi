@@ -1,0 +1,40 @@
+// A seeded generator for the `~` operator.
+
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+/// A seeded Xoshiro256++ generator for `g ~ d`, which advances `g` as
+/// `d.sample(ref g)` does. It is an `Rng`, so the method forms take it
+/// too. A copy continues the same stream on its own.
+///
+/// ```nabi
+/// use stats::{Distribution, Normal, Sampler};
+///
+/// let g = Sampler::seed(42);
+/// let a = Normal::standard().sample(ref g);
+/// let b = Normal::standard().sample(ref g);
+/// assert(a != b);
+/// ```
+#[derive(Clone)]
+pub struct Sampler {
+    g: Xoshiro256PlusPlus;
+}
+
+impl Sampler {
+    /// The stream of `Xoshiro256PlusPlus::seed(seed)`.
+    ///
+    /// ```nabi
+    /// use std::random::Rng;
+    ///
+    /// let a = stats::Sampler::seed(1);
+    /// let b = stats::Sampler::seed(1);
+    /// assert(a.next_u64() == b.next_u64());
+    /// ```
+    pub fn seed(seed: u64) -> Sampler { Sampler { g: Xoshiro256PlusPlus::seed(seed) } }
+
+    /// A stream seeded from the operating system.
+    pub fn from_os() -> Sampler { Sampler { g: Xoshiro256PlusPlus::from_os() } }
+}
+
+impl Rng for Sampler {
+    fn next_u64(ref self) -> u64 { self.g.next_u64() }
+}

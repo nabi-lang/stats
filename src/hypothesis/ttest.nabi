@@ -1,0 +1,149 @@
+// Student's and Welch's t-tests.
+
+use pkg::data::{Sample, Values};
+use pkg::descriptive::{mean_of, var_of};
+use pkg::dist::{Continuous, StudentT};
+use pkg::error::{finite, need, same};
+use pkg::hypothesis::{Alternative, TestResult, t_pvalue};
+use pkg::{Interval, StatsError};
+
+/// The outcome of a t-test: the t statistic, its p-value and degrees
+/// of freedom, the estimate (a mean or a difference of means) and its
+/// standard error, from which `ci` gives a confidence interval.
+///
+/// ```nabi
+/// let t = try stats::ttest_1samp([5.1, 4.9, 5.6, 5.8, 6.0, 5.4], 5.0);
+/// let ci = t.ci(95pct);
+/// assert(5.0 < ci.lo && t.estimate in ci);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TTest {
+    /// The t statistic.
+    pub statistic: f64;
+    /// Its p-value.
+    pub pvalue: f64;
+    /// The degrees of freedom (Welch-Satterthwaite's for unequal
+    /// variances, so not always an integer).
+    pub df: f64;
+    /// The mean (one sample), the difference of means (two samples) or
+    /// the mean difference (paired).
+    pub estimate: f64;
+    /// The standard error of `estimate`.
+    pub se: f64;
+    /// The alternative the p-value is for.
+    pub alternative: Alternative;
+}
+
+impl TTest {
+    /// The confidence interval for the estimate at `level` (e.g.
+    /// `95pct`): two-sided, or one-sided (open on one end) to match
+    /// the alternative.
+    ///
+    /// ```nabi
+    /// let t = try stats::ttest_1samp([1.0, 2.0, 3.0], 0.0);
+    /// let ci = t.ci(95pct);
+    /// assert((ci.mid() - 2.0).abs() < 1e-15 && (ci.width() - 2.0 * 4.302652729749464 / 3.0.sqrt()).abs() < 1e-14); // t(2): 0.95 / sqrt(0.04875)
+    /// ```
+    pub fn ci(self, level: f64) -> Interval {
+        let d = StudentT { nu: self.df };
+        match self.alternative {
+            Alternative::TwoSided => {
+                let h = d.isf(0.5 - 0.5 * level) * self.se;
+                Interval { lo: self.estimate - h, hi: self.estimate + h }
+            }
+            Alternative::Less => Interval { lo: f64::NEG_INFINITY, hi: self.estimate + d.ppf(level) * self.se },
+            Alternative::Greater => Interval { lo: self.estimate - d.ppf(level) * self.se, hi: f64::INFINITY },
+        }
+    }
+
+    /// The statistic, p-value and degrees of freedom as a `TestResult`.
+    ///
+    /// ```nabi
+    /// let r = (try stats::ttest_1samp([1.0, 2.0, 3.0], 0.0)).result();
+    /// assert(r.df == 2.0);
+    /// ```
+    pub fn result(self) -> TestResult { TestResult { statistic: self.statistic, pvalue: self.pvalue, df: self.df } }
+}
+
+impl Display for TTest {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(f"t = {self.statistic:.6}, df = {self.df:.4}, p-value = {self.pvalue:.6e}, estimate {self.estimate:.6} (se {self.se:.6})")
+    }
+}
+
+fn make(estimate: f64, null: f64, se: f64, df: f64, alt: Alternative) -> TTest {
+    let t = (estimate - null) / se;
+    TTest { statistic: t, pvalue: t_pvalue(t, df, alt), df: df, estimate: estimate, se: se, alternative: alt }
+}
+
+fn values<X: Sample>(what: str, x: X, need_n: usize) throws (StatsError) -> Values {
+    let v = x.values();
+    try need(what, need_n, v.n);
+    try finite(what, v);
+    v
+}
+
+/// The one-sample t-test of `mean(x) = popmean`: `t = (mean - popmean)
+/// / (s / sqrt(n))` on `n - 1` degrees of freedom. Constant data give
+/// NaN (or infinite) t, as SciPy.
+///
+/// ```nabi
+/// // SciPy: ttest_1samp([5.1, 4.9, 5.6, 5.8, 6.0, 5.4], 5.0)
+/// let t = try stats::ttest_1samp([5.1, 4.9, 5.6, 5.8, 6.0, 5.4], 5.0);
+/// assert((t.statistic - 2.7351263280759683).abs() < 1e-14);
+/// assert((t.pvalue - 0.0410291985518795).abs() < 1e-15);
+/// ```
+pub fn ttest_1samp<X: Sample>(x: X, popmean: f64, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TTest {
+    let v = try values("ttest_1samp", x, 2);
+    let n = v.n as f64;
+    make(mean_of(v), popmean, (var_of(v, 1) / n).sqrt(), n - 1.0, alternative)
+}
+
+/// The two-sample t-test of equal means. By default Welch's test
+/// (`equal_var: false`), which does not assume equal variances: `t =
+/// (m1 - m2) / sqrt(s1^2 / n1 + s2^2 / n2)` on the Welch-Satterthwaite
+/// degrees of freedom. `equal_var: true` gives Student's pooled test on
+/// `n1 + n2 - 2`.
+///
+/// ```nabi
+/// let x = [19.7, 20.3, 21.4, 18.9, 20.1, 22.0];
+/// let y = [22.4, 21.8, 23.9, 22.1, 24.0];
+/// let w = try stats::ttest_ind(x, y);
+/// // SciPy: ttest_ind(x, y, equal_var=False)
+/// assert((w.statistic + 3.7299393321764254).abs() < 1e-13);
+/// assert((w.df - 8.882968116619413).abs() < 1e-13);
+/// ```
+pub fn ttest_ind<X: Sample, Y: Sample>(x: X, y: Y, equal_var: bool = false, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TTest {
+    let a = try values("ttest_ind", x, 2);
+    let b = try values("ttest_ind", y, 2);
+    let (n1, n2) = (a.n as f64, b.n as f64);
+    let (v1, v2) = (var_of(a, 1), var_of(b, 1));
+    let d = mean_of(a) - mean_of(b);
+    if equal_var {
+        let df = n1 + n2 - 2.0;
+        let sp = ((n1 - 1.0) * v1 + (n2 - 1.0) * v2) / df;
+        return make(d, 0.0, (sp * (1.0 / n1 + 1.0 / n2)).sqrt(), df, alternative);
+    }
+    let (q1, q2) = (v1 / n1, v2 / n2);
+    let df = (q1 + q2) * (q1 + q2) / (q1 * q1 / (n1 - 1.0) + q2 * q2 / (n2 - 1.0));
+    make(d, 0.0, (q1 + q2).sqrt(), df, alternative)
+}
+
+/// The paired t-test: the one-sample test of the differences `x - y`
+/// against 0.
+///
+/// ```nabi
+/// let before = [200.0, 190.0, 210.0, 220.0, 205.0];
+/// let after = [195.0, 186.0, 207.0, 211.0, 202.0];
+/// let t = try stats::ttest_rel(before, after);
+/// assert(t.estimate == 4.8 && t.df == 4.0);
+/// ```
+pub fn ttest_rel<X: Sample, Y: Sample>(x: X, y: Y, alternative: Alternative = Alternative::TwoSided) throws (StatsError) -> TTest {
+    let a = try values("ttest_rel", x, 2);
+    let b = try values("ttest_rel", y, 2);
+    try same("ttest_rel: the two samples", a.n, b.n);
+    let d = Values::new(a.n);
+    for i in 0..a.n { unsafe { d.d.set(i, a.at(i) - b.at(i)); } }
+    let n = a.n as f64;
+    make(mean_of(d), 0.0, (var_of(d, 1) / n).sqrt(), n - 1.0, alternative)
+}

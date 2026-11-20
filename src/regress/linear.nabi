@@ -1,0 +1,239 @@
+// Linear least squares with the usual inference.
+
+use pkg::data::{Sample, Values};
+use pkg::dist::{Continuous, FisherF, StudentT};
+use pkg::error::{arg, finite, from_linalg, need, same};
+use pkg::hypothesis::{Alternative, t_pvalue};
+use pkg::{Interval, StatsError};
+use core::array::{Array, Matrix, Vector};
+use linalg::Triangle;
+
+const EPS: f64 = 2.220446049250313e-16;
+
+/// A fitted linear model `y = X b + e`: coefficients, their standard
+/// errors, t statistics and p-values, the fit's R^2, the residuals.
+/// With an intercept it is `coef[0]`, the predictors follow.
+///
+/// ```nabi
+/// use core::array::{Matrix, Vector};
+///
+/// let x: Matrix<f64> = [[1], [2], [3], [4], [5]];
+/// let y: Vector<f64> = [2.1, 3.9, 6.2, 7.8, 10.1];
+/// let m = try stats::ols(x, y);
+/// assert((m.coef[1] - 1.99).abs() < 1e-12 && m.r2 > 0.99);
+/// ```
+#[derive(Clone, PartialEq, Debug)]
+pub struct Ols {
+    /// The coefficients (the intercept first, if fitted).
+    pub coef: Vector<f64>;
+    /// Their standard errors, `sqrt(diag(sigma^2 (X^T X)^-1))`.
+    pub se: Vector<f64>;
+    /// `coef / se`.
+    pub t: Vector<f64>;
+    /// The two-sided p-values of `coef = 0` on `df_resid` degrees of
+    /// freedom.
+    pub p: Vector<f64>;
+    /// The coefficient covariance `sigma^2 (X^T X)^-1`.
+    pub cov: Matrix<f64>;
+    /// `1 - SSR / SST` (SST about the mean with an intercept, about 0
+    /// without, as statsmodels).
+    pub r2: f64;
+    /// `1 - (1 - r2) (n - c) / (n - k)`, `c` = 1 with an intercept.
+    pub adj_r2: f64;
+    /// The overall F statistic of all slopes = 0.
+    pub fstat: f64;
+    /// Its p-value.
+    pub f_pvalue: f64;
+    /// The residual standard error `sqrt(SSR / df_resid)`.
+    pub sigma: f64;
+    /// `n - k`.
+    pub df_resid: f64;
+    /// `k - c`, the slopes.
+    pub df_model: f64;
+    /// `y - X b`.
+    pub resid: Vector<f64>;
+    /// `X b`.
+    pub fitted: Vector<f64>;
+    /// Whether `coef[0]` is an intercept.
+    pub intercept: bool;
+}
+
+impl Ols {
+    /// `X b` for new rows `x` (without the intercept column; it is
+    /// added as in the fit). Throws `ShapeMismatch` for a wrong number
+    /// of columns.
+    ///
+    /// ```nabi
+    /// use core::array::{Matrix, Vector};
+    ///
+    /// let x: Matrix<f64> = [[0], [1], [2]];
+    /// let y: Vector<f64> = [1, 3, 5];
+    /// let m = try stats::ols(x, y);
+    /// let new: Matrix<f64> = [[10]];
+    /// assert(((try m.predict(new))[0] - 21.0).abs() < 1e-13);
+    /// ```
+    pub fn predict(self, x: Matrix<f64>) throws (StatsError) -> Vector<f64> {
+        let d = design(x, self.intercept);
+        try same("Ols::predict: columns and coefficients", d.shape()[1], self.coef.len());
+        try! linalg::matvec(d, self.coef)
+    }
+
+    /// Confidence intervals for the coefficients at `level`:
+    /// `coef[i] +- t_(df, (1 + level) / 2) se[i]`.
+    ///
+    /// ```nabi
+    /// use core::array::{Matrix, Vector};
+    ///
+    /// let x: Matrix<f64> = [[1], [2], [3], [4]];
+    /// let y: Vector<f64> = [1.1, 1.9, 3.2, 3.9];
+    /// let m = try stats::ols(x, y);
+    /// let ci = m.ci(95pct);
+    /// assert(m.coef[1] in ci[1] && ci.len() == 2);
+    /// ```
+    pub fn ci(self, level: f64) -> List<Interval> {
+        let q = (StudentT { nu: self.df_resid }).isf(0.5 - 0.5 * level);
+        List::from_fn(self.coef.len(), |i| Interval::around(self.coef[i], q * self.se[i]))
+    }
+}
+
+/// `x` with a leading column of ones when `intercept`.
+pub(pkg) fn design(x: Matrix<f64>, intercept: bool) -> Matrix<f64> {
+    if !intercept { return x.copy(); }
+    let s = x.shape();
+    let d: Matrix<f64> = Array::ones([s[0], s[1] + 1]);
+    d[:, 1:] = x;
+    d
+}
+
+fn check_xy(what: str, x: Matrix<f64>, y: Vector<f64>, k: usize) throws (StatsError) {
+    let s = x.shape();
+    try same(f"{what}: the rows of x and the length of y", s[0], y.len());
+    try need(what, k + 1, s[0]);
+    try finite(what, Sample::values(x));
+    try finite(what, Sample::values(y));
+}
+
+/// The least-squares fit of the (possibly weighted) design `d`, `yw`;
+/// residual quantities from the unweighted `x`, `y`.
+fn fit(d: Matrix<f64>, yw: Vector<f64>, dx: Matrix<f64>, y: Vector<f64>, w: Values | none, intercept: bool) throws (StatsError) -> Ols {
+    let s = d.shape();
+    let (n, k) = (s[0], s[1]);
+    let f = try linalg::qr(d) catch e: linalg::LinalgError { throw from_linalg("ols: the design matrix", e); };
+    let r = f.r();
+    let big = 0.0;
+    for i in 0..k { big = big.max(r[i, i].abs()); }
+    for i in 0..k {
+        if !(r[i, i].abs() > (n as f64) * EPS * big) {
+            throw StatsError::Singular { what: f"ols: the design matrix (column {i} is a combination of the others)" };
+        }
+    }
+    let coef = try f.solve(yw) catch e: linalg::LinalgError { throw from_linalg("ols: the design matrix", e); };
+    let ri = try linalg::solve_triangular(r, linalg::eye::<f64>(k), Triangle::Upper) catch e: linalg::LinalgError { throw from_linalg("ols: R", e); };
+    let fitted = try! linalg::matvec(dx, coef);
+    let resid = y .- fitted;
+    // Weighted sums of squares for WLS, plain ones for OLS.
+    let wt = |i: usize| -> f64 {
+        match w {
+            none => 1.0,
+            v: Values => v.at(i),
+        }
+    };
+    let (ssr, sw, swy) = (0.0, 0.0, 0.0);
+    for i in 0..n {
+        let e = resid[i];
+        ssr += wt(i) * e * e;
+        sw += wt(i);
+        swy += wt(i) * y[i];
+    }
+    let ybar = if intercept { swy / sw } else { 0.0 };
+    let sst = 0.0;
+    for i in 0..n {
+        let dy = y[i] - ybar;
+        sst += wt(i) * dy * dy;
+    }
+    let c = if intercept { 1.0 } else { 0.0 };
+    let df_resid = (n - k) as f64;
+    let df_model = k as f64 - c;
+    let sigma2 = ssr / df_resid;
+    let cov = (try! linalg::matmul(ri, ri.t())) .* sigma2;
+    let se_l: List<f64> = List::from_fn(k, |i| cov[i, i].sqrt());
+    let se: Vector<f64> = Array::view_list(se_l, [k]);
+    let t = coef ./ se;
+    let p_l: List<f64> = List::from_fn(k, |i| t_pvalue(t[i], df_resid, Alternative::TwoSided));
+    let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { f64::NAN };
+    let adj = 1.0 - (1.0 - r2) * (n as f64 - c) / df_resid;
+    let fstat = if df_model > 0.0 { ((sst - ssr) / df_model) / sigma2 } else { f64::NAN };
+    let fp = if df_model > 0.0 && fstat == fstat { (FisherF { d1: df_model, d2: df_resid }).sf(fstat) } else { f64::NAN };
+    Ols {
+        coef: coef,
+        se: se,
+        t: t,
+        p: Array::view_list(p_l, [k]),
+        cov: cov,
+        r2: r2,
+        adj_r2: adj,
+        fstat: fstat,
+        f_pvalue: fp,
+        sigma: sigma2.sqrt(),
+        df_resid: df_resid,
+        df_model: df_model,
+        resid: resid,
+        fitted: fitted,
+        intercept: intercept,
+    }
+}
+
+/// Ordinary least squares `y = X b + e` by Householder QR (linalg):
+/// coefficients from `R b = Q^T y`, covariance `sigma^2 R^-1 R^-T`, so
+/// `X^T X` is never formed. O(n k^2). Throws `ShapeMismatch`,
+/// `TooFew` (needs more rows than coefficients), `NotFinite`, or
+/// `Singular` for collinear columns.
+///
+/// ```nabi
+/// use core::array::{Matrix, Vector};
+///
+/// // Draper and Smith style check: y = 1 + 2 x1 - x2 exactly.
+/// let x: Matrix<f64> = [[1, 0], [2, 1], [3, 1], [4, 3], [5, 2]];
+/// let y: Vector<f64> = [3, 4, 6, 6, 9];
+/// let m = try stats::ols(x, y);
+/// assert((m.coef[0] - 1.0).abs() < 1e-12 && (m.coef[2] + 1.0).abs() < 1e-12);
+/// ```
+pub fn ols(x: Matrix<f64>, y: Vector<f64>, intercept: bool = true) throws (StatsError) -> Ols {
+    let d = design(x, intercept);
+    try check_xy("ols", x, y, d.shape()[1]);
+    try fit(d, y, d, y, none, intercept)
+}
+
+/// Weighted least squares: minimizes `sum w_i (y_i - x_i b)^2` (OLS on
+/// rows scaled by `sqrt(w)`), with weights `>= 0`, e.g. inverse
+/// variances. R^2 and the residual error are weighted, as statsmodels'
+/// WLS; `resid` and `fitted` are on the original scale.
+///
+/// ```nabi
+/// use core::array::{Matrix, Vector};
+///
+/// let x: Matrix<f64> = [[1], [2], [3], [4]];
+/// let y: Vector<f64> = [1.1, 1.9, 3.2, 3.9];
+/// let w: Vector<f64> = [1, 1, 1, 1];
+/// let a = try stats::wls(x, y, w);
+/// let b = try stats::ols(x, y);
+/// assert((a.coef[1] - b.coef[1]).abs() < 1e-14);
+/// ```
+pub fn wls(x: Matrix<f64>, y: Vector<f64>, w: Vector<f64>, intercept: bool = true) throws (StatsError) -> Ols {
+    let d = design(x, intercept);
+    let k = d.shape()[1];
+    try check_xy("wls", x, y, k);
+    try same("wls: the weights and y", w.len(), y.len());
+    let wv = Sample::values(w);
+    let pos = 0usize;
+    for i in 0..wv.n {
+        let t = wv.at(i);
+        try arg(t >= 0.0 && t.is_finite(), f"wls: weight {i} is {t}; weights must be finite and >= 0");
+        if t > 0.0 { pos += 1; }
+    }
+    try need("wls (positive weights)", k + 1, pos);
+    let sq: Vector<f64> = f64::sqrt.(w);
+    let dw = d .* sq[:, none];
+    let yw = y .* sq;
+    try fit(dw, yw, d, y, wv, intercept)
+}

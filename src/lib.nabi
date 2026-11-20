@@ -1,0 +1,33 @@
+//! Statistics on core's `Array` and `List`.
+
+pub mod axis;
+pub mod descriptive;
+pub mod dist;
+pub mod hypothesis;
+pub mod nan;
+#[cfg(feature = "ops")]
+pub mod ops;
+pub mod regress;
+pub mod special;
+
+mod correlation;
+mod data;
+mod error;
+mod hist;
+mod interval;
+mod kernel;
+mod resample;
+mod sampler;
+
+pub use correlation::{CorrMethod, Ties, corr, cov, kendall, pearson, rankdata, spearman};
+pub use data::{Sample, Values};
+pub use descriptive::order::{QuantileMethod, iqr, max, median, min, mode, percentile, quantile, quantiles, range};
+pub use descriptive::{Summary, describe, kurtosis, mean, moment, sem, skew, std, sum, var, wmean, zscore};
+pub use dist::{Bernoulli, Beta, Binomial, Cauchy, ChiSquared, Continuous, Discrete, Distribution, Exponential, FisherF, Gamma, Geometric, Iid, Laplace, LogNormal, Multinomial, MultivariateNormal, NegativeBinomial, Normal, Poisson, StudentT, Uniform, Weibull};
+pub use error::StatsError;
+pub use hist::{Bins, Histogram, bin_edges, histogram};
+pub use hypothesis::{Alternative, Anova, Contingency, TTest, TestResult, chi2_contingency, chisquare, f_oneway, fisher_exact, kendalltau, ks_2samp, kstest, mannwhitneyu, pearsonr, shapiro, spearmanr, ttest_1samp, ttest_ind, ttest_rel, wilcoxon};
+pub use interval::Interval;
+pub use regress::{Logistic, Ols, logistic, ols, polyfit, polyval, wls};
+pub use resample::{BootMethod, Bootstrap, bootstrap};
+pub use sampler::Sampler;

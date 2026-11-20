@@ -1,0 +1,55 @@
+// The notation of `stats::ops`: `~` and `∼`, `±`, `pct` literals, and
+// their precedence.
+
+use pkg::{Continuous, Distribution, Sampler, ols};
+use core::array::{Matrix, Vector};
+
+#[test]
+fn sampling() {
+    let g = Sampler::seed(9);
+    let a = g ~ pkg::Normal::standard();
+    let b = g ~ pkg::Normal::standard();
+    assert(a != b);
+    // The operator draws the same stream as the method.
+    let h = Sampler::seed(9);
+    assert(pkg::Normal::standard().sample(ref h) == a);
+    // Both spellings advance one stream.
+    let u = Sampler::seed(3);
+    let v = Sampler::seed(3);
+    let (p, q) = (u ~ pkg::Normal::standard(), u ∼ pkg::Normal::standard());
+    let (r, t) = (v ∼ pkg::Normal::standard(), v ~ pkg::Normal::standard());
+    assert(p == r && q == t);
+    let xs = g ~ pkg::Normal::standard().iid(20000);
+    assert(xs.len() == 20000 && pkg::mean(xs).abs() < 0.03);
+    let k = g ~ try! pkg::Binomial::new(10, 0.5);
+    assert(0 <= k && k <= 10);
+    // `~` binds like `==`: the sides are whole sums; prefix `~` is still not.
+    let w = g ~ pkg::Normal::standard().iid(2 + 1);
+    assert(w.len() == 3 && ~0 == -1);
+}
+
+#[test]
+fn regression() {
+    let x: Vector<f64> = [1, 2, 3, 4, 5];
+    let y: Vector<f64> = [2, 4, 6, 8, 10.5];
+    let fit = try! (y ~ x).get();
+    let want = try! ols(x[:, none], y);
+    assert(fit.coef == want.coef);
+    assert((try! (y ∼ x).get()).coef == want.coef);
+    let m: Matrix<f64> = [[1, 1], [2, 2], [3, 3]];
+    let z: Vector<f64> = [1, 2, 3];
+    assert((z ~ m).is_err());
+}
+
+#[test]
+fn plus_minus() {
+    let i = 1.0 + 2.0 ± 2.0 * 0.5;
+    assert(i.lo == 2.0 && i.hi == 4.0);
+    // Left to right at the level of `+`: (8 - 2) ± 1.
+    assert((8.0 - 2.0 ± 1.0).lo == 5.0);
+    assert(2.5pct * 4.0 == 0.1 && 95pct == 0.95);
+    let t = try! pkg::ttest_1samp([1.0, 2.0, 3.0, 4.0, 5.0], 0.0);
+    let ci = t.ci(95pct);
+    let manual = t.estimate ± (pkg::StudentT { nu: t.df }).isf(2.5pct) * t.se;
+    assert((ci.lo - manual.lo).abs() < 1e-15 && (ci.hi - manual.hi).abs() < 1e-15);
+}

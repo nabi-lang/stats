@@ -1,0 +1,84 @@
+// The Laplace (double exponential) distribution.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::descriptive::order::median_of;
+use pkg::dist::{Continuous, Distribution, check, draw};
+use pkg::error::need;
+use std::random::Rng;
+
+/// The Laplace distribution with location `mu` and scale `b > 0`:
+/// density `e^(-|x - mu| / b) / (2 b)`.
+///
+/// ```nabi
+/// use stats::{Continuous, Laplace};
+///
+/// let d = try Laplace::new(0.0, 1.0);
+/// assert(d.cdf(0.0) == 0.5 && d.var() == 2.0);
+/// assert((d.ppf(0.25) + 2.0.ln()).abs() < 1e-16);
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Laplace {
+    pub(pkg) mu: f64;
+    pub(pkg) b: f64;
+}
+
+impl Laplace {
+    /// Laplace(mu, b); `mu` finite, `b` finite and > 0.
+    pub fn new(mu: f64, b: f64) throws (StatsError) -> Laplace {
+        try check(mu.is_finite() && b > 0.0 && b.is_finite(), f"Laplace: mu = {mu}, b = {b}; mu must be finite and b finite and > 0");
+        Laplace { mu: mu, b: b }
+    }
+
+    /// The location.
+    pub fn location(self) -> f64 { self.mu }
+
+    /// The scale.
+    pub fn scale(self) -> f64 { self.b }
+
+    /// The maximum-likelihood fit: the median, and the mean absolute
+    /// deviation from it.
+    ///
+    /// ```nabi
+    /// let d = try stats::Laplace::fit([1.0, 2.0, 3.0, 10.0, 4.0]);
+    /// assert(d.location() == 3.0 && d.scale() == 2.2);
+    /// ```
+    pub fn fit<X: Sample>(x: X) throws (StatsError) -> Laplace {
+        let v = x.values();
+        try need("Laplace::fit", 2, v.n);
+        try pkg::error::finite("Laplace::fit", v);
+        let m = median_of(v);
+        let s = 0.0;
+        for i in 0..v.n { s += (v.at(i) - m).abs(); }
+        try Laplace::new(m, s / v.n as f64)
+    }
+}
+
+impl Distribution for Laplace {
+    type Value = f64;
+    fn sample<G: Rng>(self, ref g: G) -> f64 { self.ppf(draw::open01(ref g)) }
+}
+
+impl Continuous for Laplace {
+    fn pdf(self, x: f64) -> f64 { (-(x - self.mu).abs() / self.b).exp() / (2.0 * self.b) }
+    fn logpdf(self, x: f64) -> f64 { -(x - self.mu).abs() / self.b - (2.0 * self.b).ln() }
+    fn cdf(self, x: f64) -> f64 {
+        let z = (x - self.mu) / self.b;
+        if z < 0.0 { 0.5 * z.exp() } else { 1.0 - 0.5 * (-z).exp() }
+    }
+    fn sf(self, x: f64) -> f64 {
+        let z = (x - self.mu) / self.b;
+        if z > 0.0 { 0.5 * (-z).exp() } else { 1.0 - 0.5 * z.exp() }
+    }
+    fn ppf(self, p: f64) -> f64 {
+        if !(p >= 0.0 && p <= 1.0) { return f64::NAN; }
+        if p < 0.5 { self.mu + self.b * (2.0 * p).ln() } else { self.mu - self.b * (2.0 * (1.0 - p)).ln() }
+    }
+    fn isf(self, q: f64) -> f64 {
+        if !(q >= 0.0 && q <= 1.0) { return f64::NAN; }
+        2.0 * self.mu - self.ppf(q)
+    }
+    fn mean(self) -> f64 { self.mu }
+    fn var(self) -> f64 { 2.0 * self.b * self.b }
+    fn median(self) -> f64 { self.mu }
+}

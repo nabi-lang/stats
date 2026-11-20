@@ -1,0 +1,277 @@
+// Input data. `Sample` is what every statistic of one set of values
+// accepts: a `List` or an `Array` of any rank, of f64, f32 or i64,
+// read in row-major order and copied once into `Values`, the
+// contiguous f64 buffer the kernels index.
+
+use pkg::kernel::buf;
+use bare::mem::GcBuf;
+use bare::ptr::ConstPtr;
+use core::array::{Array, Vector};
+use core::range::Range;
+use linalg::AsVector;
+
+// Contiguous arrays of at least this many bytes never move, so their
+// elements are read through a pointer; smaller ones go through the
+// iterator.
+const PINNED: usize = 8192;
+// From this many values the copy is split across the workers.
+const PAR: usize = 1048576;
+const CHUNK: usize = 131072;
+
+/// The data a statistic reads: `List<T>` and `Array<T, N>` of any rank
+/// for `T` in f64, f32, i64, i32 and usize, fixed arrays and `i64`
+/// ranges (what `linalg::AsVector<f64>` takes, plus any rank). Values
+/// are taken in row-major order and converted to f64.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[1, 2], [3, 4]];
+/// assert(stats::mean(m) == 2.5);
+/// assert(stats::mean([1, 2, 3, 6]) == 3.0);
+/// assert(stats::mean([1.5f32, 2.5f32]) == 2.0);
+/// assert(stats::mean(1..5) == 2.5);
+/// ```
+pub trait Sample {
+    /// The values as a contiguous f64 copy.
+    fn values(self) -> Values;
+}
+
+/// A contiguous copy of some data as f64, in row-major order: what
+/// `Sample::values` gives.
+///
+/// ```nabi
+/// use stats::Sample;
+///
+/// let v = [3.0, 1.0].values();
+/// assert(v.len() == 2 && v.to_vector()[0] == 3.0);
+/// ```
+pub struct Values {
+    pub(pkg) d: GcBuf<f64>;
+    pub(pkg) n: usize;
+}
+
+impl Values {
+    /// The number of values.
+    ///
+    /// ```nabi
+    /// use stats::Sample;
+    ///
+    /// assert([1.0, 2.0, 3.0].values().len() == 3);
+    /// ```
+    pub fn len(self) -> usize { self.n }
+
+    /// Whether there are none.
+    pub fn is_empty(self) -> bool { self.n == 0 }
+
+    /// The values as a new rank-1 array.
+    ///
+    /// ```nabi
+    /// use stats::Sample;
+    ///
+    /// let v = [1, 2].values().to_vector();
+    /// assert(v[1] == 2.0);
+    /// ```
+    pub fn to_vector(self) -> Vector<f64> { vector(self.d, 0, self.n) }
+
+    pub(pkg) fn at(self, i: usize) -> f64 { unsafe { self.d.get(i) } }
+
+    pub(pkg) fn new(n: usize) -> Values { Values { d: buf(n), n: n } }
+
+    /// The values that are not NaN, in order.
+    pub(pkg) fn without_nan(self) -> Values {
+        let out = Values::new(self.n);
+        let k = 0usize;
+        unsafe {
+            for i in 0..self.n {
+                let x = self.d.get(i);
+                if x == x {
+                    out.d.set(k, x);
+                    k += 1;
+                }
+            }
+        }
+        Values { d: out.d, n: k }
+    }
+}
+
+// Every `values()` is a fresh buffer the caller may reorder.
+impl Sample for Values {
+    fn values(self) -> Values { Values { d: pkg::kernel::copy(self.d, 0, self.n), n: self.n } }
+}
+
+impl<const N: usize> Sample for Array<f64, N> {
+    fn values(self) -> Values { of_array(self) }
+}
+
+impl<const N: usize> Sample for Array<f32, N> {
+    fn values(self) -> Values { (self.as_list() ?? self.to_list()).values() }
+}
+
+impl<const N: usize> Sample for Array<i64, N> {
+    fn values(self) -> Values { (self.as_list() ?? self.to_list()).values() }
+}
+
+impl<const N: usize> Sample for [f64; N] {
+    fn values(self) -> Values {
+        let out = Values::new(N);
+        unsafe {
+            for i in 0..N { out.d.set(i, self[i]); }
+        }
+        out
+    }
+}
+
+impl Sample for List<f64> {
+    fn values(self) -> Values {
+        let n = self.len();
+        let out = Values::new(n);
+        unsafe {
+            for i in 0..n { out.d.set(i, self[i]); }
+        }
+        out
+    }
+}
+
+impl Sample for List<f32> {
+    fn values(self) -> Values {
+        let n = self.len();
+        let out = Values::new(n);
+        unsafe {
+            for i in 0..n { out.d.set(i, self[i] as f64); }
+        }
+        out
+    }
+}
+
+impl Sample for List<i64> {
+    fn values(self) -> Values {
+        let n = self.len();
+        let out = Values::new(n);
+        unsafe {
+            for i in 0..n { out.d.set(i, self[i] as f64); }
+        }
+        out
+    }
+}
+
+// The other forms `linalg::AsVector<f64>` takes, so every package
+// accepts the same data.
+impl<const N: usize> Sample for Array<i32, N> {
+    fn values(self) -> Values { (self.as_list() ?? self.to_list()).values() }
+}
+
+impl<const N: usize> Sample for Array<usize, N> {
+    fn values(self) -> Values { (self.as_list() ?? self.to_list()).values() }
+}
+
+impl Sample for List<i32> {
+    fn values(self) -> Values { of_vector(self.as_vector()) }
+}
+
+impl Sample for List<usize> {
+    fn values(self) -> Values { of_vector(self.as_vector()) }
+}
+
+impl<const N: usize> Sample for [i64; N] {
+    fn values(self) -> Values { of_vector(self.as_vector()) }
+}
+
+impl<const N: usize> Sample for [f32; N] {
+    fn values(self) -> Values { of_vector(self.as_vector()) }
+}
+
+impl Sample for Range<i64> {
+    fn values(self) -> Values { of_vector(self.as_vector()) }
+}
+
+fn of_vector(v: Vector<f64>) -> Values { of_array(v) }
+
+// Contiguous arrays from their start share their buffer as a list,
+// which copies at list speed. Other layouts go through the iterator.
+// Above `PAR` values a pinned array is copied by the workers through
+// its address: arrays are not `Sync`.
+// FIXME: a `ManyPtr::read` loop is 3 ns a value against 0.9 ns for a
+// list index, and `for x in a` 15 ns; both are left for the layouts the
+// shared list does not cover.
+fn of_array<const N: usize>(a: Array<f64, N>) -> Values {
+    let n = a.len();
+    let out = Values::new(n);
+    let d = out.d;
+    if n < PAR {
+        match a.as_list() {
+            xs: List<f64> => {
+                unsafe {
+                    for i in 0..n { d.set(i, xs[i]); }
+                }
+                return out;
+            }
+            none => {}
+        }
+    }
+    if a.is_contiguous() && n * 8 >= PINNED {
+        let p = unsafe { a.as_ptr().as_many() };
+        // A pointer is not `Send`; the workers rebuild it from the address.
+        let at = p.addr();
+        let chunks = (n + CHUNK - 1) / CHUNK;
+        par::for_each(0..chunks, |c: usize| {
+            let q = ConstPtr::<f64>::dangling().with_addr(at).as_many();
+            let s = c * CHUNK;
+            let e = (s + CHUNK).min(n);
+            unsafe {
+                for i in s..e { d.set(i, q.read(i)); }
+            }
+        });
+        return out;
+    }
+    let i = 0usize;
+    unsafe {
+        for x in a {
+            d.set(i, x);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A new rank-1 array of `d[o..o + n]`, built as a list it then shares.
+pub(pkg) fn vector(d: GcBuf<f64>, o: usize, n: usize) -> Vector<f64> {
+    let xs: List<f64> = List::filled(n, 0.0);
+    unsafe {
+        for i in 0..n { xs[i] = d.get(o + i); }
+    }
+    Array::view_list(xs, [n])
+}
+
+/// A new array of `shape` from `d[0..]` in row-major order.
+pub(pkg) fn shaped<const M: usize>(d: GcBuf<f64>, shape: [usize; M]) -> Array<f64, M> {
+    let n: usize = 1;
+    for k in 0..M { n *= shape[k]; }
+    vector(d, 0, n).reshape(shape)
+}
+
+/// The lanes of `a` along `axis`: `(values, lanes, length, shape)`.
+/// Lane `j` is `values[j * length..(j + 1) * length]`; `shape` is
+/// `a`'s with `axis` removed, the lanes in its row-major order.
+pub(pkg) fn lanes<const N: usize>(a: Array<f64, N>, axis: usize) -> (Values, usize, usize, [usize; N - 1]) {
+    let s = a.shape();
+    let order: [usize; N] = [0; N];
+    let rest: [usize; N - 1] = [0; N - 1];
+    let j = 0usize;
+    for k in 0..N {
+        if k != axis {
+            order[j] = k;
+            rest[j] = s[k];
+            j += 1;
+        }
+    }
+    order[N - 1] = axis;
+    let len = s[axis];
+    let count = if len == 0 { 1usize } else { a.len() / len };
+    if len == 0 {
+        count = 1;
+        for k in 0..N - 1 { count *= rest[k]; }
+    }
+    let v = of_array(a.permute(order).copy());
+    (v, count, len, rest)
+}

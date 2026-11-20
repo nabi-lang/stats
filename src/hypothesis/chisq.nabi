@@ -1,0 +1,134 @@
+// Pearson's chi-squared tests: goodness of fit and independence in a
+// contingency table.
+
+use pkg::StatsError;
+use pkg::data::Sample;
+use pkg::dist::{ChiSquared, Continuous};
+use pkg::error::{arg, need, same};
+use pkg::hypothesis::TestResult;
+use pkg::kernel;
+use core::array::{Array, Matrix, Vector};
+
+fn chi2_sf(x: f64, df: f64) -> f64 {
+    if !(df > 0.0) { return f64::NAN; }
+    (ChiSquared { k: df }).sf(x)
+}
+
+/// Pearson's goodness-of-fit test of observed counts against expected
+/// ones: `sum((o - e)^2 / e)` on `k - 1 - ddof` degrees of freedom.
+/// Without `expected` every category expects the same count; given, it
+/// must have the same total as `observed` within 1e-8 relative. SciPy:
+/// `chisquare(f_obs, f_exp)`.
+///
+/// ```nabi
+/// let r = try stats::chisquare([16.0, 18.0, 16.0, 14.0, 12.0, 12.0]);
+/// assert(r.statistic == 2.0 && r.df == 5.0);
+/// let r = try stats::chisquare([43.0, 52.0, 54.0, 40.0], [47.25, 47.25, 47.25, 47.25]);
+/// assert((r.statistic - 2.9365079365079363).abs() < 1e-15);
+/// ```
+pub fn chisquare<X: Sample>(observed: X, expected: Vector<f64> | none = none, ddof: usize = 0) throws (StatsError) -> TestResult {
+    let o = observed.values();
+    let e = match expected {
+        x: Vector<f64> => x.values(),
+        none => {
+            let total = kernel::sum(o.d, 0, o.n);
+            let e = pkg::Values::new(o.n);
+            for i in 0..o.n { unsafe { e.d.set(i, total / o.n as f64); } }
+            e
+        }
+    };
+    try gof(o, e, ddof)
+}
+
+fn gof(o: pkg::Values, e: pkg::Values, ddof: usize) throws (StatsError) -> TestResult {
+    try need("chisquare", 2, o.n);
+    for i in 0..o.n { try arg(o.at(i) >= 0.0 && o.at(i).is_finite(), f"chisquare: observed[{i}] = {o.at(i)}; counts must be finite and >= 0"); }
+    try same("chisquare: observed and expected", o.n, e.n);
+    for i in 0..e.n { try arg(e.at(i) > 0.0 && e.at(i).is_finite(), f"chisquare: expected[{i}] = {e.at(i)}; expected counts must be > 0"); }
+    let total = kernel::sum(o.d, 0, o.n);
+    let te = kernel::sum(e.d, 0, e.n);
+    try arg((total - te).abs() <= 1e-8 * total.max(te), f"chisquare: observed sums to {total}, expected to {te}; scale the expected counts to the same total");
+    try arg(o.n > ddof + 1, f"chisquare: ddof = {ddof} leaves no degrees of freedom for {o.n} categories");
+    let s = 0.0;
+    for i in 0..o.n {
+        let d = o.at(i) - e.at(i);
+        s += d * d / e.at(i);
+    }
+    let df = (o.n - 1 - ddof) as f64;
+    TestResult { statistic: s, pvalue: chi2_sf(s, df), df: df }
+}
+
+/// The chi-squared test of independence in a contingency table: its
+/// statistic, p-value, degrees of freedom `(r - 1)(c - 1)` and the
+/// expected counts under independence.
+#[derive(Clone, PartialEq, Debug)]
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let t: Matrix<f64> = [[5, 5], [5, 5]];
+/// let r = try stats::chi2_contingency(t, correction: false);
+/// assert(r.statistic == 0.0 && r.pvalue == 1.0 && r.expected[0, 0] == 5.0);
+/// ```
+pub struct Contingency {
+    /// Pearson's statistic (Yates-corrected for one degree of freedom
+    /// when asked).
+    pub statistic: f64;
+    /// Its p-value.
+    pub pvalue: f64;
+    /// `(rows - 1) (columns - 1)`.
+    pub df: f64;
+    /// Row total times column total over the grand total.
+    pub expected: Matrix<f64>;
+}
+
+/// Pearson's chi-squared test of independence of the rows and columns
+/// of a table of counts. With `correction` (the default, as SciPy) and
+/// one degree of freedom, Yates' continuity correction moves each count
+/// half a unit toward its expected value. Throws `InvalidArgument` for
+/// a negative count or a zero row or column total.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let t: Matrix<f64> = [[10, 10, 20], [20, 20, 20]];
+/// let r = try stats::chi2_contingency(t);
+/// assert(r.df == 2.0 && (r.statistic - 2.7777777777777777).abs() < 1e-14);
+/// ```
+pub fn chi2_contingency(table: Matrix<f64>, correction: bool = true) throws (StatsError) -> Contingency {
+    let s = table.shape();
+    let (r, c) = (s[0], s[1]);
+    try arg(r >= 1 && c >= 1, "chi2_contingency: the table is empty");
+    let rows: List<f64> = List::from_fn(r, |_| 0.0);
+    let cols: List<f64> = List::from_fn(c, |_| 0.0);
+    for i in 0..r {
+        for j in 0..c {
+            let x = table[i, j];
+            try arg(x >= 0.0 && x.is_finite(), f"chi2_contingency: table[{i}, {j}] = {x}; counts must be finite and >= 0");
+            rows[i] += x;
+            cols[j] += x;
+        }
+    }
+    let n = 0.0;
+    for i in 0..r { n += rows[i]; }
+    for i in 0..r { try arg(rows[i] > 0.0, f"chi2_contingency: row {i} sums to 0; drop empty rows"); }
+    for j in 0..c { try arg(cols[j] > 0.0, f"chi2_contingency: column {j} sums to 0; drop empty columns"); }
+    let e: Matrix<f64> = Array::from_fn([r, c], |ix: [usize; 2]| -> f64 { rows[ix[0]] * cols[ix[1]] / n });
+    let df = ((r - 1) * (c - 1)) as f64;
+    if df == 0.0 {
+        return Contingency { statistic: 0.0, pvalue: 1.0, df: 0.0, expected: e };
+    }
+    let stat = 0.0;
+    for i in 0..r {
+        for j in 0..c {
+            let (o, x) = (table[i, j], e[i, j]);
+            let d = o - x;
+            if correction && df == 1.0 {
+                let m = d.abs().min(0.5);
+                d = if d > 0.0 { d - m } else { d + m };
+            }
+            stat += d * d / x;
+        }
+    }
+    Contingency { statistic: stat, pvalue: chi2_sf(stat, df), df: df, expected: e }
+}

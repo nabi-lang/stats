@@ -18,7 +18,8 @@ const PI: f64 = 3.141592653589793;
 ///
 /// let d = try StudentT::new(10.0);
 /// // mpmath: 2.22813885198627475; SciPy 1.13 gives 2.2281388519649385.
-/// assert((d.ppf(0.975) - 2.2281388519862747).abs() < 1e-15);
+/// // A few ulps either way: the platform's libm differs (Windows' UCRT).
+/// assert((d.ppf(0.975) - 2.2281388519862747).abs() < 4e-15);
 /// assert((d.cdf(-2.0) - 0.036694017385370196).abs() < 1e-16);
 /// ```
 #[derive(Clone, Copy, PartialEq, Debug)]

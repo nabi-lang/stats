@@ -1,6 +1,6 @@
 Package {
     name: "stats",
-    version: "0.1.0",
+    version: "0.1.1",
     nabi_version: "0.1.0",
     toolchain: "0.1",
     description: "Statistics on core arrays: descriptive statistics, special functions, distributions, hypothesis tests, regression, bootstrap",

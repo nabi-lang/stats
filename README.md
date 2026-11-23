@@ -147,7 +147,7 @@ statsmodels and NIST's certified Longley regression.
 
 ## Docs
 
-https://packages.nabi-lang.org/packages/stats/latest/docs
+https://docs.nabi-lang.org/packages/stats/latest
 
 ## License
 
